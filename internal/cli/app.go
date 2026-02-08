@@ -105,9 +105,9 @@ func (a *App) Run(args []string) error {
 	case *applyUsed:
 		return a.runApply(*configPath)
 	case *lsUsed:
-		return a.notImplemented("ls")
+		return a.runList(*configPath)
 	case *statusUsed:
-		return a.notImplemented(fmt.Sprintf("status %s", *statusJob))
+		return a.runStatus(*configPath, *statusJob)
 	case *logsUsed:
 		return a.notImplemented(fmt.Sprintf("logs %s", *logsJob))
 	case *failuresUsed:
@@ -122,7 +122,7 @@ func (a *App) Run(args []string) error {
 	case *disableUsed:
 		return a.notImplemented(fmt.Sprintf("disable %s", *disableJob))
 	case *doctorUsed:
-		return a.notImplemented("doctor")
+		return a.runDoctor()
 	default:
 		return nil
 	}
@@ -156,6 +156,67 @@ func (a *App) runApply(path string) error {
 	}
 	if err != nil {
 		return fmt.Errorf("%s %v", errStyle.Render("apply failed:"), err)
+	}
+	return nil
+}
+
+func (a *App) runList(path string) error {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("list failed:"), err)
+	}
+	items, err := launchd.List(cfg, launchd.StatusOptions{})
+	if err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("list failed:"), err)
+	}
+
+	fmt.Fprintln(a.out, titleStyle.Render("Beagle Jobs"))
+	for _, item := range items {
+		state := "not-loaded"
+		if item.Loaded {
+			state = "loaded"
+		}
+		fmt.Fprintf(a.out, "- %s (%s) enabled=%t state=%s\n", item.ID, item.Type, item.Enabled, state)
+	}
+	return nil
+}
+
+func (a *App) runStatus(path string, jobID string) error {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("status failed:"), err)
+	}
+	item, err := launchd.GetStatus(cfg, jobID, launchd.StatusOptions{})
+	if err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("status failed:"), err)
+	}
+	fmt.Fprintln(a.out, titleStyle.Render("Beagle Status"))
+	fmt.Fprintf(a.out, "job: %s\n", item.ID)
+	fmt.Fprintf(a.out, "label: %s\n", item.Label)
+	fmt.Fprintf(a.out, "type: %s\n", item.Type)
+	fmt.Fprintf(a.out, "enabled: %t\n", item.Enabled)
+	fmt.Fprintf(a.out, "loaded: %t\n", item.Loaded)
+	fmt.Fprintf(a.out, "plist: %s\n", item.Plist)
+	if item.Raw != "" {
+		fmt.Fprintf(a.out, "launchctl:\n%s\n", item.Raw)
+	}
+	return nil
+}
+
+func (a *App) runDoctor() error {
+	report, err := launchd.Doctor(launchd.StatusOptions{})
+	if err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("doctor failed:"), err)
+	}
+
+	fmt.Fprintln(a.out, titleStyle.Render("Beagle Doctor"))
+	fmt.Fprintf(a.out, "home dir: %t\n", report.HomeDirOK)
+	fmt.Fprintf(a.out, "launch agents dir: %t\n", report.LaunchAgentsOK)
+	fmt.Fprintf(a.out, "launchctl: %t\n", report.LaunchctlOK)
+	if len(report.Issues) > 0 {
+		for _, issue := range report.Issues {
+			fmt.Fprintf(a.out, "- %s\n", issue)
+		}
 	}
 	return nil
 }
