@@ -1,0 +1,13 @@
+version: 1
+defaults:
+  timezone: America/Chicago
+jobs:
+  hello_minute:
+    type: schedule
+    command:
+      - /Users/amterp/src/beagle/scripts/hello-world.sh
+    schedule:
+      cron: "* * * * *"
+      timezone: America/Chicago
+    restart: never
+    enabled: true
