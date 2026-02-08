@@ -50,7 +50,7 @@ func TestDoctorDetectsMissingLaunchctl(t *testing.T) {
 	if report.LaunchctlOK {
 		t.Fatalf("expected launchctl to fail: %+v", report)
 	}
-	if !strings.Contains(strings.Join(report.Issues, "\n"), "launchctl") {
-		t.Fatalf("expected launchctl issue, got %+v", report)
+	if !strings.Contains(strings.Join(report.Issues, "\n"), "scheduler backend command") {
+		t.Fatalf("expected scheduler backend issue, got %+v", report)
 	}
 }

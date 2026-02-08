@@ -20,7 +20,7 @@ func New(out, errOut io.Writer) *App {
 
 func (a *App) Run(args []string) error {
 	root := ra.NewCmd("beagle").
-		SetDescription("Beagle orchestrates launchd jobs from beagle.yaml").
+		SetDescription("Beagle orchestrates scheduled and always-on jobs from beagle.yaml").
 		SetAutoHelpOnNoArgs(true)
 
 	configPath, err := ra.NewString("config").
@@ -34,7 +34,7 @@ func (a *App) Run(args []string) error {
 	}
 
 	validateCmd := ra.NewCmd("validate").SetDescription("Validate Beagle configuration")
-	applyCmd := ra.NewCmd("apply").SetDescription("Reconcile launchd resources")
+	applyCmd := ra.NewCmd("apply").SetDescription("Reconcile Beagle-managed jobs")
 	lsCmd := ra.NewCmd("ls").SetDescription("List configured jobs")
 	statusCmd := ra.NewCmd("status").SetDescription("Show detailed job status")
 	logsCmd := ra.NewCmd("logs").SetDescription("Show job logs")
@@ -192,13 +192,11 @@ func (a *App) runStatus(path string, jobID string) error {
 	}
 	fmt.Fprintln(a.out, titleStyle.Render("Beagle Status"))
 	fmt.Fprintf(a.out, "job: %s\n", item.ID)
-	fmt.Fprintf(a.out, "label: %s\n", item.Label)
 	fmt.Fprintf(a.out, "type: %s\n", item.Type)
-	fmt.Fprintf(a.out, "enabled: %t\n", item.Enabled)
-	fmt.Fprintf(a.out, "loaded: %t\n", item.Loaded)
-	fmt.Fprintf(a.out, "plist: %s\n", item.Plist)
-	if item.Raw != "" {
-		fmt.Fprintf(a.out, "launchctl:\n%s\n", item.Raw)
+	fmt.Fprintf(a.out, "configured: %t\n", item.Enabled)
+	fmt.Fprintf(a.out, "active: %t\n", item.Loaded)
+	if item.Disabled {
+		fmt.Fprintln(a.out, "runtime state: paused")
 	}
 	return nil
 }
@@ -210,9 +208,8 @@ func (a *App) runDoctor() error {
 	}
 
 	fmt.Fprintln(a.out, titleStyle.Render("Beagle Doctor"))
-	fmt.Fprintf(a.out, "home dir: %t\n", report.HomeDirOK)
-	fmt.Fprintf(a.out, "launch agents dir: %t\n", report.LaunchAgentsOK)
-	fmt.Fprintf(a.out, "launchctl: %t\n", report.LaunchctlOK)
+	fmt.Fprintf(a.out, "home dir ready: %t\n", report.HomeDirOK)
+	fmt.Fprintf(a.out, "scheduler backend ready: %t\n", report.LaunchAgentsOK && report.LaunchctlOK)
 	if len(report.Issues) > 0 {
 		for _, issue := range report.Issues {
 			fmt.Fprintf(a.out, "- %s\n", issue)

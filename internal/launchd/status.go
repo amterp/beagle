@@ -102,7 +102,7 @@ func Doctor(opts StatusOptions) (DoctorReport, error) {
 	if st, err := os.Stat(launchDir); err == nil && st.IsDir() {
 		report.LaunchAgentsOK = true
 	} else {
-		report.Issues = append(report.Issues, "LaunchAgents directory is missing")
+		report.Issues = append(report.Issues, "scheduler backend directory is missing")
 	}
 
 	runner := opts.RunOut
@@ -112,7 +112,7 @@ func Doctor(opts StatusOptions) (DoctorReport, error) {
 	if _, err := runner("launchctl", "help"); err == nil {
 		report.LaunchctlOK = true
 	} else {
-		report.Issues = append(report.Issues, "launchctl is unavailable")
+		report.Issues = append(report.Issues, "scheduler backend command is unavailable")
 	}
 
 	return report, nil
