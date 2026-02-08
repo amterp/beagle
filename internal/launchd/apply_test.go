@@ -2,6 +2,7 @@ package launchd
 
 import (
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -21,6 +22,10 @@ func (f *fakeRunner) Run(name string, args ...string) error {
 
 func TestApplyWritesPlistAndBootstraps(t *testing.T) {
 	dir := t.TempDir()
+	runnerPath := filepath.Join(dir, "beagle-run")
+	if err := os.WriteFile(runnerPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	f := config.File{
 		Version: config.CurrentVersion,
 		Jobs: config.Jobs{
@@ -35,7 +40,7 @@ func TestApplyWritesPlistAndBootstraps(t *testing.T) {
 	runner := &fakeRunner{}
 	summary, err := Apply(f, ApplyOptions{
 		HomeDir:    dir,
-		RunnerPath: "/usr/local/bin/beagle-run",
+		RunnerPath: runnerPath,
 		Runner:     runner,
 	})
 	if err != nil {
@@ -56,6 +61,10 @@ func TestApplyWritesPlistAndBootstraps(t *testing.T) {
 
 func TestApplyReportsRunnerErrors(t *testing.T) {
 	dir := t.TempDir()
+	runnerPath := filepath.Join(dir, "beagle-run")
+	if err := os.WriteFile(runnerPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
 	f := config.File{
 		Version: config.CurrentVersion,
 		Jobs: config.Jobs{
@@ -70,7 +79,7 @@ func TestApplyReportsRunnerErrors(t *testing.T) {
 	runner := &fakeRunner{err: errors.New("launchctl failed")}
 	summary, err := Apply(f, ApplyOptions{
 		HomeDir:    dir,
-		RunnerPath: "/usr/local/bin/beagle-run",
+		RunnerPath: runnerPath,
 		Runner:     runner,
 	})
 	if err == nil {

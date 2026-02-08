@@ -65,7 +65,11 @@ func Apply(f config.File, opts ApplyOptions) (Summary, error) {
 
 	runnerPath := opts.RunnerPath
 	if runnerPath == "" {
-		runnerPath = "beagle-run"
+		runnerPath = strings.TrimSpace(os.Getenv("BEAGLE_RUNNER_PATH"))
+	}
+	runnerPath, err = resolveRunnerPath(runnerPath)
+	if err != nil {
+		return Summary{}, err
 	}
 
 	runner := opts.Runner
@@ -178,4 +182,30 @@ func sanitizeLabelPart(s string) string {
 	s = strings.ReplaceAll(s, " ", "_")
 	s = strings.ReplaceAll(s, ".", "_")
 	return strings.ToLower(s)
+}
+
+func resolveRunnerPath(path string) (string, error) {
+	if path != "" {
+		if !filepath.IsAbs(path) {
+			return "", fmt.Errorf("runner path must be absolute: %s", path)
+		}
+		info, err := os.Stat(path)
+		if err != nil {
+			return "", fmt.Errorf("runner path invalid: %w", err)
+		}
+		if info.IsDir() {
+			return "", fmt.Errorf("runner path is a directory: %s", path)
+		}
+		return path, nil
+	}
+
+	found, err := exec.LookPath("beagle-run")
+	if err != nil {
+		return "", fmt.Errorf("beagle-run not found; set BEAGLE_RUNNER_PATH to an absolute beagle-run binary")
+	}
+	abs, err := filepath.Abs(found)
+	if err != nil {
+		return "", err
+	}
+	return abs, nil
 }
