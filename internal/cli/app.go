@@ -5,6 +5,7 @@ import (
 	"io"
 
 	"github.com/amterp/beagle/internal/config"
+	"github.com/amterp/beagle/internal/launchd"
 	"github.com/amterp/ra"
 )
 
@@ -102,7 +103,7 @@ func (a *App) Run(args []string) error {
 	case *validateUsed:
 		return a.runValidate(*configPath)
 	case *applyUsed:
-		return a.notImplemented("apply")
+		return a.runApply(*configPath)
 	case *lsUsed:
 		return a.notImplemented("ls")
 	case *statusUsed:
@@ -135,6 +136,27 @@ func (a *App) runValidate(path string) error {
 
 	fmt.Fprintln(a.out, titleStyle.Render("Beagle Config"))
 	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render("OK"), infoStyle.Render(path))
+	return nil
+}
+
+func (a *App) runApply(path string) error {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("apply failed:"), err)
+	}
+
+	summary, err := launchd.Apply(cfg, launchd.ApplyOptions{})
+	fmt.Fprintln(a.out, titleStyle.Render("Beagle Apply"))
+	fmt.Fprintf(a.out, "created: %d, updated: %d, removed: %d, unchanged: %d\n",
+		summary.Created, summary.Updated, summary.Removed, summary.Unchanged)
+	if len(summary.Errors) > 0 {
+		for _, e := range summary.Errors {
+			fmt.Fprintf(a.out, "- %s\n", e)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("apply failed:"), err)
+	}
 	return nil
 }
 
