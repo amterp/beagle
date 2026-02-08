@@ -1,11 +1,14 @@
 package cli
 
 import (
+	"context"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/amterp/beagle/internal/config"
 	"github.com/amterp/beagle/internal/launchd"
+	"github.com/amterp/beagle/internal/runlog"
 	"github.com/amterp/ra"
 )
 
@@ -46,7 +49,10 @@ func (a *App) Run(args []string) error {
 
 	statusJob, _ := ra.NewString("job").SetUsage("Job id").Register(statusCmd)
 	logsJob, _ := ra.NewString("job").SetUsage("Job id").Register(logsCmd)
+	logsStderr, _ := ra.NewBool("stderr").SetOptional(true).SetUsage("Show stderr log").Register(logsCmd)
+	logsTail, _ := ra.NewInt("tail").SetDefault(100).SetOptional(true).SetUsage("Tail line count").Register(logsCmd)
 	failuresJob, _ := ra.NewString("job").SetUsage("Job id").SetOptional(true).Register(failuresCmd)
+	failuresLimit, _ := ra.NewInt("limit").SetDefault(20).SetOptional(true).SetUsage("Number of failures").Register(failuresCmd)
 	runNowJob, _ := ra.NewString("job").SetUsage("Job id").Register(runNowCmd)
 	enableJob, _ := ra.NewString("job").SetUsage("Job id").Register(enableCmd)
 	disableJob, _ := ra.NewString("job").SetUsage("Job id").Register(disableCmd)
@@ -109,18 +115,15 @@ func (a *App) Run(args []string) error {
 	case *statusUsed:
 		return a.runStatus(*configPath, *statusJob)
 	case *logsUsed:
-		return a.notImplemented(fmt.Sprintf("logs %s", *logsJob))
+		return a.runLogs(*configPath, *logsJob, *logsStderr, *logsTail)
 	case *failuresUsed:
-		if *failuresJob == "" {
-			return a.notImplemented("failures")
-		}
-		return a.notImplemented(fmt.Sprintf("failures %s", *failuresJob))
+		return a.runFailures(*failuresJob, *failuresLimit)
 	case *runNowUsed:
-		return a.notImplemented(fmt.Sprintf("run-now %s", *runNowJob))
+		return a.runNow(*configPath, *runNowJob)
 	case *enableUsed:
-		return a.notImplemented(fmt.Sprintf("enable %s", *enableJob))
+		return a.runEnable(*configPath, *enableJob)
 	case *disableUsed:
-		return a.notImplemented(fmt.Sprintf("disable %s", *disableJob))
+		return a.runDisable(*configPath, *disableJob)
 	case *doctorUsed:
 		return a.runDoctor()
 	default:
@@ -215,6 +218,86 @@ func (a *App) runDoctor() error {
 			fmt.Fprintf(a.out, "- %s\n", issue)
 		}
 	}
+	return nil
+}
+
+func (a *App) runLogs(path string, jobID string, stderr bool, tail int) error {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("logs failed:"), err)
+	}
+	out, err := launchd.ReadLogs(cfg, jobID, stderr, tail, launchd.OpsOptions{})
+	if err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("logs failed:"), err)
+	}
+	if strings.TrimSpace(out) == "" {
+		fmt.Fprintln(a.out, infoStyle.Render("no log output"))
+		return nil
+	}
+	fmt.Fprint(a.out, out)
+	return nil
+}
+
+func (a *App) runFailures(jobID string, limit int) error {
+	dbPath, err := runlog.DefaultPath()
+	if err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("failures failed:"), err)
+	}
+	store, err := runlog.Open(dbPath)
+	if err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("failures failed:"), err)
+	}
+	defer store.Close()
+
+	failures, err := store.RecentFailures(context.Background(), jobID, limit)
+	if err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("failures failed:"), err)
+	}
+	if len(failures) == 0 {
+		fmt.Fprintln(a.out, infoStyle.Render("no failures recorded"))
+		return nil
+	}
+	fmt.Fprintln(a.out, titleStyle.Render("Beagle Failures"))
+	for _, f := range failures {
+		fmt.Fprintf(a.out, "- %s %s exit=%d class=%s\n",
+			f.StartedAt.Format("2006-01-02 15:04:05"), f.JobID, f.ExitCode, f.FailureCls)
+	}
+	return nil
+}
+
+func (a *App) runNow(path string, jobID string) error {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("run-now failed:"), err)
+	}
+	if err := launchd.RunNow(cfg, jobID, launchd.OpsOptions{}); err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("run-now failed:"), err)
+	}
+	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render("triggered"), jobID)
+	return nil
+}
+
+func (a *App) runEnable(path string, jobID string) error {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("enable failed:"), err)
+	}
+	if err := launchd.Enable(cfg, jobID, launchd.OpsOptions{}); err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("enable failed:"), err)
+	}
+	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render("enabled"), jobID)
+	return nil
+}
+
+func (a *App) runDisable(path string, jobID string) error {
+	cfg, err := config.Load(path)
+	if err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("disable failed:"), err)
+	}
+	if err := launchd.Disable(cfg, jobID, launchd.OpsOptions{}); err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("disable failed:"), err)
+	}
+	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render("disabled"), jobID)
 	return nil
 }
 
