@@ -49,3 +49,44 @@ func TestStoreStartFinishAndFailures(t *testing.T) {
 		t.Fatalf("unexpected failure class: %+v", fails[0])
 	}
 }
+
+func TestBreakerStateOpensAfterFailureThreshold(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "beagle.db")
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+
+	now := time.Now().UTC()
+	policy := BreakerPolicy{
+		MaxFailures:     2,
+		WindowSeconds:   60,
+		CooldownSeconds: 120,
+	}
+
+	if err := store.RecordOutcome(context.Background(), "worker_a", now, true, policy); err != nil {
+		t.Fatal(err)
+	}
+	open, _, err := store.IsBreakerOpen(context.Background(), "worker_a", now.Add(time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if open {
+		t.Fatal("breaker should not be open after first failure")
+	}
+
+	if err := store.RecordOutcome(context.Background(), "worker_a", now.Add(2*time.Second), true, policy); err != nil {
+		t.Fatal(err)
+	}
+	open, until, err := store.IsBreakerOpen(context.Background(), "worker_a", now.Add(3*time.Second))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !open {
+		t.Fatal("breaker should be open after second failure")
+	}
+	if until.Before(now) {
+		t.Fatalf("expected future open-until time: %v", until)
+	}
+}

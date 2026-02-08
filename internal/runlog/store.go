@@ -42,6 +42,12 @@ type Failure struct {
 	Notes      string
 }
 
+type BreakerPolicy struct {
+	MaxFailures     int
+	WindowSeconds   int
+	CooldownSeconds int
+}
+
 func Open(path string) (*Store, error) {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return nil, fmt.Errorf("create state dir: %w", err)
@@ -156,6 +162,87 @@ WHERE status = 'failed'`
 	return out, rows.Err()
 }
 
+func (s *Store) IsBreakerOpen(ctx context.Context, jobID string, now time.Time) (bool, time.Time, error) {
+	var openUntilRaw string
+	err := s.db.QueryRowContext(ctx, `SELECT open_until FROM breaker_state WHERE job_id = ?`, jobID).Scan(&openUntilRaw)
+	if err == sql.ErrNoRows {
+		return false, time.Time{}, nil
+	}
+	if err != nil {
+		return false, time.Time{}, err
+	}
+	openUntil, err := time.Parse(time.RFC3339Nano, openUntilRaw)
+	if err != nil {
+		return false, time.Time{}, nil
+	}
+	return now.Before(openUntil), openUntil, nil
+}
+
+func (s *Store) RecordOutcome(ctx context.Context, jobID string, now time.Time, failed bool, policy BreakerPolicy) error {
+	if policy.MaxFailures <= 0 || policy.WindowSeconds <= 0 || policy.CooldownSeconds <= 0 {
+		return nil
+	}
+
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if err != nil {
+			_ = tx.Rollback()
+		}
+	}()
+
+	type state struct {
+		count      int
+		windowFrom string
+		openUntil  string
+	}
+	var st state
+	row := tx.QueryRowContext(ctx, `SELECT failure_count, window_started_at, open_until FROM breaker_state WHERE job_id = ?`, jobID)
+	scanErr := row.Scan(&st.count, &st.windowFrom, &st.openUntil)
+	if scanErr == sql.ErrNoRows {
+		st = state{count: 0, windowFrom: now.UTC().Format(time.RFC3339Nano)}
+	} else if scanErr != nil {
+		return scanErr
+	}
+
+	windowFrom, _ := time.Parse(time.RFC3339Nano, st.windowFrom)
+	if windowFrom.IsZero() {
+		windowFrom = now
+	}
+	if now.Sub(windowFrom) > time.Duration(policy.WindowSeconds)*time.Second {
+		st.count = 0
+		windowFrom = now
+	}
+
+	if failed {
+		st.count++
+	}
+
+	openUntil := time.Time{}
+	if st.openUntil != "" {
+		openUntil, _ = time.Parse(time.RFC3339Nano, st.openUntil)
+	}
+	if failed && st.count >= policy.MaxFailures {
+		openUntil = now.Add(time.Duration(policy.CooldownSeconds) * time.Second)
+	}
+
+	_, err = tx.ExecContext(ctx, `
+INSERT INTO breaker_state(job_id, failure_count, window_started_at, open_until, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(job_id) DO UPDATE SET
+	failure_count = excluded.failure_count,
+	window_started_at = excluded.window_started_at,
+	open_until = excluded.open_until,
+	updated_at = excluded.updated_at
+`, jobID, st.count, windowFrom.UTC().Format(time.RFC3339Nano), openUntil.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 func (s *Store) migrate(ctx context.Context) error {
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS runs (
@@ -182,6 +269,13 @@ func (s *Store) migrate(ctx context.Context) error {
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_runs_job_started ON runs(job_id, started_at DESC);`,
 		`CREATE INDEX IF NOT EXISTS idx_runs_status_started ON runs(status, started_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS breaker_state (
+			job_id TEXT PRIMARY KEY,
+			failure_count INTEGER NOT NULL,
+			window_started_at TEXT NOT NULL,
+			open_until TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
 	}
 
 	for _, stmt := range stmts {

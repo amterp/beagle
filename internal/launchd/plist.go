@@ -41,6 +41,16 @@ func BuildSpec(label string, rj config.ResolvedJob, runnerPath string, stdoutPat
 	for k, v := range rj.Env {
 		spec.Env[k] = v
 	}
+	spec.Env["BEAGLE_JOB_ID"] = rj.ID
+	spec.Env["BEAGLE_JOB_TYPE"] = rj.Type
+	spec.Env["BEAGLE_BREAKER_MAX_FAILURES"] = fmt.Sprintf("%d", rj.CircuitBreaker.MaxFailures)
+	spec.Env["BEAGLE_BREAKER_WINDOW_SECONDS"] = fmt.Sprintf("%d", rj.CircuitBreaker.WindowSeconds)
+	spec.Env["BEAGLE_BREAKER_COOLDOWN_SECONDS"] = fmt.Sprintf("%d", rj.CircuitBreaker.CooldownSeconds)
+	if rj.Type == "schedule" {
+		spec.Env["BEAGLE_SCHEDULE_CRON"] = rj.Schedule.Cron
+		spec.Env["BEAGLE_SCHEDULE_TIMEZONE"] = rj.Schedule.Timezone
+		spec.Env["BEAGLE_SCHEDULE_STRICT_TZ"] = "1"
+	}
 
 	if rj.Type == "schedule" {
 		cal, err := ParseCron(rj.Schedule.Cron)

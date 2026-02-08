@@ -6,10 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
+	"github.com/amterp/beagle/internal/launchd"
 	"github.com/amterp/beagle/internal/runlog"
 	"github.com/amterp/ra"
 )
@@ -69,6 +71,32 @@ func run(args []string) int {
 		return 1
 	}
 
+	now := time.Now().UTC()
+	policy := breakerPolicyFromEnv()
+	if open, until, err := store.IsBreakerOpen(context.Background(), job, now); err == nil && open {
+		_ = store.FinishRun(context.Background(), runlog.RunFinish{
+			ID:         runID,
+			Finished:   now,
+			ExitCode:   0,
+			Status:     "skipped",
+			FailureCls: "circuit_open",
+			Notes:      "circuit breaker open until " + until.Format(time.RFC3339),
+		})
+		return 0
+	}
+
+	if shouldSkipForTimezone(*command) {
+		_ = store.FinishRun(context.Background(), runlog.RunFinish{
+			ID:         runID,
+			Finished:   now,
+			ExitCode:   0,
+			Status:     "skipped",
+			FailureCls: "tz_gate_skip",
+			Notes:      "schedule does not match configured timezone gate",
+		})
+		return 0
+	}
+
 	realCmd := exec.Command((*command)[0], (*command)[1:]...)
 	realCmd.Stdout = os.Stdout
 	realCmd.Stderr = os.Stderr
@@ -84,6 +112,7 @@ func run(args []string) int {
 			Notes:      err.Error(),
 		})
 		fmt.Fprintln(os.Stderr, err)
+		_ = store.RecordOutcome(context.Background(), job, time.Now().UTC(), true, policy)
 		return 127
 	}
 
@@ -121,6 +150,7 @@ func run(args []string) int {
 	if err := store.FinishRun(context.Background(), finish); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
+	_ = store.RecordOutcome(context.Background(), job, time.Now().UTC(), finish.Status == "failed", policy)
 
 	return exitCode
 }
@@ -135,4 +165,62 @@ func forwardSignals(child *exec.Cmd) {
 			}
 		}
 	}()
+}
+
+func breakerPolicyFromEnv() runlog.BreakerPolicy {
+	return runlog.BreakerPolicy{
+		MaxFailures:     envInt("BEAGLE_BREAKER_MAX_FAILURES"),
+		WindowSeconds:   envInt("BEAGLE_BREAKER_WINDOW_SECONDS"),
+		CooldownSeconds: envInt("BEAGLE_BREAKER_COOLDOWN_SECONDS"),
+	}
+}
+
+func envInt(key string) int {
+	raw := strings.TrimSpace(os.Getenv(key))
+	if raw == "" {
+		return 0
+	}
+	n, _ := strconv.Atoi(raw)
+	return n
+}
+
+func shouldSkipForTimezone(command []string) bool {
+	if os.Getenv("BEAGLE_JOB_TYPE") != "schedule" {
+		return false
+	}
+	if os.Getenv("BEAGLE_SCHEDULE_STRICT_TZ") != "1" {
+		return false
+	}
+	cron := strings.TrimSpace(os.Getenv("BEAGLE_SCHEDULE_CRON"))
+	tz := strings.TrimSpace(os.Getenv("BEAGLE_SCHEDULE_TIMEZONE"))
+	if cron == "" || tz == "" || len(command) == 0 {
+		return false
+	}
+
+	loc, err := time.LoadLocation(tz)
+	if err != nil {
+		return false
+	}
+	cal, err := launchd.ParseCron(cron)
+	if err != nil {
+		return false
+	}
+	now := time.Now().In(loc)
+	if cal.Minute != nil && *cal.Minute != now.Minute() {
+		return true
+	}
+	if cal.Hour != nil && *cal.Hour != now.Hour() {
+		return true
+	}
+	if cal.Day != nil && *cal.Day != now.Day() {
+		return true
+	}
+	if cal.Month != nil && *cal.Month != int(now.Month()) {
+		return true
+	}
+	weekday := int(now.Weekday())
+	if cal.Weekday != nil && *cal.Weekday != weekday {
+		return true
+	}
+	return false
 }
