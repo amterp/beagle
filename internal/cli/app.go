@@ -100,9 +100,38 @@ func (a *App) Run(args []string) error {
 
 	if err := root.ParseOrError(args); err != nil {
 		if err == ra.HelpInvokedErr {
+			target := resolveHelpTarget(root, args, map[string]*ra.Cmd{
+				"validate": validateCmd,
+				"apply":    applyCmd,
+				"ls":       lsCmd,
+				"status":   statusCmd,
+				"logs":     logsCmd,
+				"failures": failuresCmd,
+				"run-now":  runNowCmd,
+				"enable":   enableCmd,
+				"disable":  disableCmd,
+				"doctor":   doctorCmd,
+			})
+			if wantsLongHelp(args) {
+				fmt.Fprint(a.out, target.GenerateLongUsage())
+			} else {
+				fmt.Fprint(a.out, target.GenerateShortUsage())
+			}
 			return nil
 		}
-		return err
+		target := resolveHelpTarget(root, args, map[string]*ra.Cmd{
+			"validate": validateCmd,
+			"apply":    applyCmd,
+			"ls":       lsCmd,
+			"status":   statusCmd,
+			"logs":     logsCmd,
+			"failures": failuresCmd,
+			"run-now":  runNowCmd,
+			"enable":   enableCmd,
+			"disable":  disableCmd,
+			"doctor":   doctorCmd,
+		})
+		return fmt.Errorf("%v\n\n%s", err, target.GenerateLongUsage())
 	}
 
 	switch {
@@ -304,4 +333,23 @@ func (a *App) runDisable(path string, jobID string) error {
 func (a *App) notImplemented(name string) error {
 	fmt.Fprintf(a.out, "%s %s\n", infoStyle.Render("TODO:"), name)
 	return nil
+}
+
+func wantsLongHelp(args []string) bool {
+	for _, arg := range args {
+		if arg == "--help" {
+			return true
+		}
+	}
+	return false
+}
+
+func resolveHelpTarget(root *ra.Cmd, args []string, subs map[string]*ra.Cmd) *ra.Cmd {
+	if len(args) == 0 {
+		return root
+	}
+	if sub, ok := subs[args[0]]; ok {
+		return sub
+	}
+	return root
 }
