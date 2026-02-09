@@ -16,7 +16,7 @@ func TestBuildAndRenderServicePlist(t *testing.T) {
 		Enabled: true,
 	}
 
-	spec, err := BuildSpec("com.beagle.test.worker_a", rj, "beagle-run", "/tmp/stdout.log", "/tmp/stderr.log")
+	spec, err := BuildSpec("com.beagle.test.worker_a", rj, "beagle-run", "/tmp/stdout.log", "/tmp/stderr.log", "team-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,7 +45,7 @@ func TestBuildAndRenderSchedulePlist(t *testing.T) {
 		},
 	}
 
-	spec, err := BuildSpec("com.beagle.test.monthly_report", rj, "beagle-run", "/tmp/stdout.log", "/tmp/stderr.log")
+	spec, err := BuildSpec("com.beagle.test.monthly_report", rj, "beagle-run", "/tmp/stdout.log", "/tmp/stderr.log", "team-a")
 	if err != nil {
 		t.Fatal(err)
 	}

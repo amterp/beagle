@@ -12,8 +12,9 @@ import (
 )
 
 type OpsOptions struct {
-	HomeDir string
-	Runner  CommandRunner
+	HomeDir   string
+	Runner    CommandRunner
+	Namespace string
 }
 
 func RunNow(f config.File, jobID string, opts OpsOptions) error {
@@ -58,7 +59,8 @@ func ReadLogs(f config.File, jobID string, stderr bool, tailLines int, opts OpsO
 	if stderr {
 		name = "stderr.log"
 	}
-	path := filepath.Join(home, ".local", "share", "beagle", "logs", jobID, name)
+	namespace := normalizeNamespace(opts.Namespace)
+	path := filepath.Join(home, ".local", "share", "beagle", "logs", namespace, jobID, name)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
@@ -90,7 +92,8 @@ func jobRuntimeContext(f config.File, jobID string, opts OpsOptions) (uid string
 	if !ok {
 		return "", "", "", nil, fmt.Errorf("job not found: %s", jobID)
 	}
-	label = fmt.Sprintf("com.beagle.%s.%s", sanitizeLabelPart(u.Username), jobID)
+	namespace := normalizeNamespace(opts.Namespace)
+	label = fmt.Sprintf("com.beagle.%s.%s.%s", sanitizeLabelPart(u.Username), namespace, jobID)
 	plistPath = filepath.Join(home, "Library", "LaunchAgents", label+".plist")
 	runner = opts.Runner
 	if runner == nil {

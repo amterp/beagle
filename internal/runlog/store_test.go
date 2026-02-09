@@ -17,10 +17,12 @@ func TestStoreStartFinishAndFailures(t *testing.T) {
 
 	started := time.Now().Add(-2 * time.Second).UTC()
 	runID, err := store.StartRun(context.Background(), RunStart{
-		JobID:   "worker_a",
-		Command: "/bin/echo hello",
-		PID:     123,
-		Started: started,
+		JobID:     "worker_a",
+		JobKey:    "team-a:worker_a",
+		Namespace: "team-a",
+		Command:   "/bin/echo hello",
+		PID:       123,
+		Started:   started,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -38,7 +40,7 @@ func TestStoreStartFinishAndFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fails, err := store.RecentFailures(context.Background(), "worker_a", 10)
+	fails, err := store.RecentFailures(context.Background(), "team-a", "worker_a", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -65,10 +67,10 @@ func TestBreakerStateOpensAfterFailureThreshold(t *testing.T) {
 		CooldownSeconds: 120,
 	}
 
-	if err := store.RecordOutcome(context.Background(), "worker_a", now, true, policy); err != nil {
+	if err := store.RecordOutcome(context.Background(), "team-a:worker_a", now, true, policy); err != nil {
 		t.Fatal(err)
 	}
-	open, _, err := store.IsBreakerOpen(context.Background(), "worker_a", now.Add(time.Second))
+	open, _, err := store.IsBreakerOpen(context.Background(), "team-a:worker_a", now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -76,10 +78,10 @@ func TestBreakerStateOpensAfterFailureThreshold(t *testing.T) {
 		t.Fatal("breaker should not be open after first failure")
 	}
 
-	if err := store.RecordOutcome(context.Background(), "worker_a", now.Add(2*time.Second), true, policy); err != nil {
+	if err := store.RecordOutcome(context.Background(), "team-a:worker_a", now.Add(2*time.Second), true, policy); err != nil {
 		t.Fatal(err)
 	}
-	open, until, err := store.IsBreakerOpen(context.Background(), "worker_a", now.Add(3*time.Second))
+	open, until, err := store.IsBreakerOpen(context.Background(), "team-a:worker_a", now.Add(3*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}

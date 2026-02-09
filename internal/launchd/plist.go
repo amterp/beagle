@@ -24,10 +24,14 @@ type JobSpec struct {
 	Timezone    string
 }
 
-func BuildSpec(label string, rj config.ResolvedJob, runnerPath string, stdoutPath string, stderrPath string) (JobSpec, error) {
+func BuildSpec(label string, rj config.ResolvedJob, runnerPath string, stdoutPath string, stderrPath string, namespace string) (JobSpec, error) {
+	jobKey := rj.ID
+	if namespace != "" {
+		jobKey = namespace + ":" + rj.ID
+	}
 	spec := JobSpec{
 		Label:       label,
-		ProgramArgs: append([]string{runnerPath, "--job", rj.ID, "--"}, rj.Command...),
+		ProgramArgs: append([]string{runnerPath, "--job", rj.ID, "--job-key", jobKey, "--namespace", namespace, "--"}, rj.Command...),
 		WorkingDir:  rj.WorkingDir,
 		Env:         map[string]string{},
 		StdoutPath:  stdoutPath,
@@ -42,6 +46,8 @@ func BuildSpec(label string, rj config.ResolvedJob, runnerPath string, stdoutPat
 		spec.Env[k] = v
 	}
 	spec.Env["BEAGLE_JOB_ID"] = rj.ID
+	spec.Env["BEAGLE_NAMESPACE"] = namespace
+	spec.Env["BEAGLE_JOB_KEY"] = jobKey
 	spec.Env["BEAGLE_JOB_TYPE"] = rj.Type
 	spec.Env["BEAGLE_BREAKER_MAX_FAILURES"] = fmt.Sprintf("%d", rj.CircuitBreaker.MaxFailures)
 	spec.Env["BEAGLE_BREAKER_WINDOW_SECONDS"] = fmt.Sprintf("%d", rj.CircuitBreaker.WindowSeconds)

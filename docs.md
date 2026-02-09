@@ -28,19 +28,26 @@ jobs:
 
 ## Commands
 
+- `beagle profile register <name> <config-path>`
+- `beagle profile ls`
+- `beagle profile use <name>`
+- `beagle profile rm <name>`
 - `beagle validate`
 - `beagle apply`
 - `beagle ls`
-- `beagle status <job>`
-- `beagle logs <job> [--stderr] [--tail N]`
-- `beagle failures [--job <job>] [--limit N]`
-- `beagle run-now <job>`
-- `beagle enable <job>`
-- `beagle disable <job>`
+- `beagle status <job|profile:job>`
+- `beagle logs <job|profile:job> [--stderr] [--tail N]`
+- `beagle failures [--job <job|profile:job>] [--limit N]`
+- `beagle run-now <job|profile:job>`
+- `beagle enable <job|profile:job>`
+- `beagle disable <job|profile:job>`
 - `beagle doctor`
 
 ## Notes
 
+- Use `--profile <name>` globally on config-backed commands.
+- Command resolution precedence is `--config` then `--profile` then active profile then local `./beagle.yaml`.
+- If you use `profile:job` it overrides `--profile` for that command target.
 - Beagle hides scheduler implementation details from daily workflows.
 - Job execution history and failures are persisted in `~/.local/share/beagle/beagle.db`.
-- Job logs default to `~/.local/share/beagle/logs/<job>/`.
+- Job logs default to `~/.local/share/beagle/logs/<namespace>/<job>/`.

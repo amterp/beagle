@@ -30,6 +30,7 @@ type ApplyOptions struct {
 	HomeDir    string
 	RunnerPath string
 	Runner     CommandRunner
+	Namespace  string
 }
 
 type Summary struct {
@@ -54,7 +55,8 @@ func Apply(f config.File, opts ApplyOptions) (Summary, error) {
 		}
 	}
 	launchDir := filepath.Join(home, "Library", "LaunchAgents")
-	logsRoot := filepath.Join(home, ".local", "share", "beagle", "logs")
+	namespace := normalizeNamespace(opts.Namespace)
+	logsRoot := filepath.Join(home, ".local", "share", "beagle", "logs", namespace)
 
 	if err := os.MkdirAll(launchDir, 0o755); err != nil {
 		return Summary{}, fmt.Errorf("create launch agents dir: %w", err)
@@ -87,7 +89,7 @@ func Apply(f config.File, opts ApplyOptions) (Summary, error) {
 	desired := map[string]string{}
 	desiredLabels := map[string]string{}
 	for _, job := range jobs {
-		label := fmt.Sprintf("com.beagle.%s.%s", username, job.ID)
+		label := fmt.Sprintf("com.beagle.%s.%s.%s", username, namespace, job.ID)
 		plistPath := filepath.Join(launchDir, label+".plist")
 		stdoutPath := filepath.Join(logsRoot, job.ID, "stdout.log")
 		stderrPath := filepath.Join(logsRoot, job.ID, "stderr.log")
@@ -95,7 +97,7 @@ func Apply(f config.File, opts ApplyOptions) (Summary, error) {
 			return Summary{}, fmt.Errorf("create logs for %s: %w", job.ID, err)
 		}
 
-		spec, err := BuildSpec(label, job, runnerPath, stdoutPath, stderrPath)
+		spec, err := BuildSpec(label, job, runnerPath, stdoutPath, stderrPath, namespace)
 		if err != nil {
 			return Summary{}, err
 		}
@@ -107,7 +109,7 @@ func Apply(f config.File, opts ApplyOptions) (Summary, error) {
 		desiredLabels[plistPath] = label
 	}
 
-	managedPattern := filepath.Join(launchDir, "com.beagle.*.plist")
+	managedPattern := filepath.Join(launchDir, fmt.Sprintf("com.beagle.%s.%s.*.plist", username, namespace))
 	existing, err := filepath.Glob(managedPattern)
 	if err != nil {
 		return Summary{}, fmt.Errorf("glob managed plists: %w", err)
@@ -182,6 +184,16 @@ func sanitizeLabelPart(s string) string {
 	s = strings.ReplaceAll(s, " ", "_")
 	s = strings.ReplaceAll(s, ".", "_")
 	return strings.ToLower(s)
+}
+
+func normalizeNamespace(namespace string) string {
+	ns := strings.TrimSpace(strings.ToLower(namespace))
+	if ns == "" {
+		return "default"
+	}
+	ns = strings.ReplaceAll(ns, " ", "_")
+	ns = strings.ReplaceAll(ns, ".", "_")
+	return ns
 }
 
 func resolveRunnerPath(path string) (string, error) {

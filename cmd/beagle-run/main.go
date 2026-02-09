@@ -27,6 +27,16 @@ func run(args []string) int {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
 	}
+	jobKey, err := ra.NewString("job-key").SetOptional(true).SetUsage("Namespaced job key").Register(cmd)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
+	namespace, err := ra.NewString("namespace").SetOptional(true).SetUsage("Job namespace").Register(cmd)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 1
+	}
 	command, err := ra.NewStringSlice("command").SetVariadic(true).SetUsage("Command and args").Register(cmd)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -60,11 +70,27 @@ func run(args []string) int {
 
 	started := time.Now().UTC()
 	job := strings.TrimSpace(*jobID)
+	ns := strings.TrimSpace(*namespace)
+	if ns == "" {
+		ns = strings.TrimSpace(os.Getenv("BEAGLE_NAMESPACE"))
+	}
+	key := strings.TrimSpace(*jobKey)
+	if key == "" {
+		key = strings.TrimSpace(os.Getenv("BEAGLE_JOB_KEY"))
+	}
+	if key == "" {
+		key = job
+		if ns != "" {
+			key = ns + ":" + job
+		}
+	}
 	runID, err := store.StartRun(context.Background(), runlog.RunStart{
-		JobID:   job,
-		Command: strings.Join(*command, " "),
-		PID:     os.Getpid(),
-		Started: started,
+		JobID:     job,
+		JobKey:    key,
+		Namespace: ns,
+		Command:   strings.Join(*command, " "),
+		PID:       os.Getpid(),
+		Started:   started,
 	})
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
@@ -73,7 +99,7 @@ func run(args []string) int {
 
 	now := time.Now().UTC()
 	policy := breakerPolicyFromEnv()
-	if open, until, err := store.IsBreakerOpen(context.Background(), job, now); err == nil && open {
+	if open, until, err := store.IsBreakerOpen(context.Background(), key, now); err == nil && open {
 		_ = store.FinishRun(context.Background(), runlog.RunFinish{
 			ID:         runID,
 			Finished:   now,
@@ -112,7 +138,7 @@ func run(args []string) int {
 			Notes:      err.Error(),
 		})
 		fmt.Fprintln(os.Stderr, err)
-		_ = store.RecordOutcome(context.Background(), job, time.Now().UTC(), true, policy)
+		_ = store.RecordOutcome(context.Background(), key, time.Now().UTC(), true, policy)
 		return 127
 	}
 
@@ -150,7 +176,7 @@ func run(args []string) int {
 	if err := store.FinishRun(context.Background(), finish); err != nil {
 		fmt.Fprintln(os.Stderr, err)
 	}
-	_ = store.RecordOutcome(context.Background(), job, time.Now().UTC(), finish.Status == "failed", policy)
+	_ = store.RecordOutcome(context.Background(), key, time.Now().UTC(), finish.Status == "failed", policy)
 
 	return exitCode
 }

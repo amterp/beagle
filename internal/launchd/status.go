@@ -15,8 +15,9 @@ import (
 type OutputRunner func(name string, args ...string) (string, error)
 
 type StatusOptions struct {
-	HomeDir string
-	RunOut  OutputRunner
+	HomeDir   string
+	RunOut    OutputRunner
+	Namespace string
 }
 
 type JobStatus struct {
@@ -49,8 +50,9 @@ func List(f config.File, opts StatusOptions) ([]JobStatus, error) {
 
 	launchDir := filepath.Join(home, "Library", "LaunchAgents")
 	items := make([]JobStatus, 0, len(resolved))
+	namespace := normalizeNamespace(opts.Namespace)
 	for _, j := range resolved {
-		label := fmt.Sprintf("com.beagle.%s.%s", username, j.ID)
+		label := fmt.Sprintf("com.beagle.%s.%s.%s", username, namespace, j.ID)
 		plist := filepath.Join(launchDir, label+".plist")
 		raw, loaded, disabled := inspectLabel(outRunner, uid, label)
 		items = append(items, JobStatus{
