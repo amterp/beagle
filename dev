@@ -3,12 +3,17 @@
 Build script for Beagle.
 ---
 args:
-    fmt f bool    # Format code
-    vet v bool    # Vet code
-    test t bool   # Run tests
-    build b bool  # Build binaries into ./bin/
-    check c bool  # Run fmt, vet, and test
-    clean bool    # Remove ./bin/
+    fmt f bool                        # Format code
+    vet v bool                        # Vet code
+    test t bool                       # Run tests
+    build b bool                      # Build binaries into ./bin/
+    check c bool                      # Run fmt, vet, and test
+    clean bool                        # Remove ./bin/
+    push p bool                       # Push up to origin
+    release r str?                    # Release type (patch, minor, major)
+    tap_path str = "../homebrew-tap"  # Path to homebrew-tap repo
+
+    release enum ["patch", "minor", "major"]
 
 if clean:
     $`rm -rf ./bin`
@@ -25,3 +30,192 @@ if test or check:
 if build:
     $`go build -o ./bin/beagle ./cmd/beagle`
     $`go build -o ./bin/beagle-run ./cmd/beagle-run`
+
+if push:
+    code, stdout = quiet $`git status --porcelain -uno`
+    if stdout != "":
+        print_err("Git status is not clean, aborting push")
+        exit(1)
+    stdout = quiet $`git branch --show-current`
+    branch = stdout.trim()
+    $`git push origin {branch}`
+
+if release:
+    // Ensure we're on main branch
+    stdout = quiet $`git branch --show-current`
+    branch = stdout.trim()
+    if branch != "main":
+        print_err("Release must be run from main branch (currently on '{branch}')")
+        exit(1)
+
+    // Run checks first
+    stdout = quiet $`gofmt -l .`
+    if stdout != "":
+        print_err("Go files need formatting. Run './dev -f' to fix:")
+        print_err(stdout)
+        exit(1)
+    $`go vet ./...`
+    $`go test ./...`
+
+    // Calculate new version from latest tag
+    stdout = quiet $`git tag -l 'v*' --sort=-v:refname`
+    tags = stdout.trim().split("\n")
+    latest_tag = ""
+    if tags.len() == 0 or tags[0] == "":
+        major = 0
+        minor = 1
+        patch = 0
+        print("No existing tags found. Starting at 0.1.0")
+    else:
+        latest_tag = tags[0]
+
+        // Parse version (strip leading 'v')
+        version_str = latest_tag[1:]
+        parts = version_str.split("\\.")
+        major = parse_int(parts[0])
+        minor = parse_int(parts[1])
+        patch = parse_int(parts[2])
+
+        print("Current version: {version_str}")
+
+        // Bump based on type
+        switch release:
+            case "patch":
+                patch += 1
+            case "minor":
+                minor += 1
+                patch = 0
+            case "major":
+                major += 1
+                minor = 0
+                patch = 0
+
+    release = "{major}.{minor}.{patch}"
+    print("New version: {release}")
+
+    // Paths
+    stdout = quiet $`pwd`
+    repo = stdout.trim()
+    releases_dir = "{repo}/releases"
+    formula_path = "{repo}/{tap_path}/Formula/beagle.rb"
+    tag = "v{release}"
+
+    // Build for darwin-arm64
+    print("Building darwin-arm64...")
+    $`GOOS=darwin GOARCH=arm64 go build -o beagle ./cmd/beagle`
+    $`GOOS=darwin GOARCH=arm64 go build -o beagle-run ./cmd/beagle-run`
+    $`mkdir -p {releases_dir}`
+    arm64_tar = "{releases_dir}/beagle-{release}-darwin-arm64.tar.gz"
+    quiet $`rm -f {arm64_tar}` catch:
+        pass
+    $`tar -czf {arm64_tar} beagle beagle-run`
+
+    // Build for darwin-amd64
+    print("Building darwin-amd64...")
+    $`GOOS=darwin GOARCH=amd64 go build -o beagle ./cmd/beagle`
+    $`GOOS=darwin GOARCH=amd64 go build -o beagle-run ./cmd/beagle-run`
+    amd64_tar = "{releases_dir}/beagle-{release}-darwin-amd64.tar.gz"
+    quiet $`rm -f {amd64_tar}` catch:
+        pass
+    $`tar -czf {amd64_tar} beagle beagle-run`
+
+    // Clean up binaries
+    quiet $`rm -f beagle beagle-run` catch:
+        pass
+
+    // Calculate SHA256
+    stdout = quiet $`shasum -a 256 {arm64_tar}`
+    sha256_arm64 = stdout.split(" ")[0]
+    stdout = quiet $`shasum -a 256 {amd64_tar}`
+    sha256_amd64 = stdout.split(" ")[0]
+
+    // Push main so commits are on GitHub for changelog generation
+    print("Pushing main...")
+    $`git push origin main`
+
+    // Generate changelog from commits since last tag (using GitHub compare API)
+    print("Generating changelog...")
+    if latest_tag == "":
+        changelog = "Initial release"
+        compare_url = ""
+    else:
+        // Compare API returns all commits with GitHub usernames in one request
+        stdout = quiet $`gh api repos/amterp/beagle/compare/{latest_tag}...main`
+        data = parse_json(stdout)
+        commits = data["commits"]
+        changelog = ""
+        for commit in commits:
+            full_hash = commit["sha"]
+            short_hash = full_hash[:7]
+            subject = commit["commit"]["message"].split("\n")[0]
+            // Use GitHub login if available, fall back to git author name
+            if commit["author"] != null:
+                author = commit["author"]["login"]
+            else:
+                author = commit["commit"]["author"]["name"]
+            if changelog != "":
+                changelog += "\n"
+            changelog += "- [`{short_hash}`](https://github.com/amterp/beagle/commit/{full_hash}): {subject} by @{author}"
+        if changelog == "":
+            changelog = "No changes since last release"
+        compare_url = "**Full Changelog**: https://github.com/amterp/beagle/compare/{latest_tag}...{tag}"
+
+    notes = """
+## What's Changed
+
+{changelog}
+
+{compare_url}
+"""
+    notes_file = "{releases_dir}/release-notes.md"
+
+    // Git tag
+    print("Tagging {tag}...")
+    $`git tag {tag}`
+
+    // GitHub release
+    print("Creating GitHub release...")
+    write_file(notes_file, notes)
+    $`gh release create {tag} {arm64_tar} {amd64_tar} --repo amterp/beagle --title "Beagle {tag}" --notes-file {notes_file}`
+    quiet $`rm -f {notes_file}` catch:
+        pass
+
+    // Update formula
+    print("Updating formula...")
+    formula = """
+class Beagle < Formula
+  desc "macOS job scheduler with profile-based multi-repo workflows"
+  homepage "https://github.com/amterp/beagle"
+  version "{release}"
+  license "Apache-2.0"
+
+  on_macos do
+    if Hardware::CPU.arm?
+      url "https://github.com/amterp/beagle/releases/download/v#\{version}/beagle-#\{version}-darwin-arm64.tar.gz"
+      sha256 "{sha256_arm64}"
+    else
+      url "https://github.com/amterp/beagle/releases/download/v#\{version}/beagle-#\{version}-darwin-amd64.tar.gz"
+      sha256 "{sha256_amd64}"
+    end
+  end
+
+  def install
+    bin.install "beagle"
+    bin.install "beagle-run"
+  end
+
+  test do
+    system "#\{bin}/beagle", "--help"
+  end
+end
+"""
+    write_file(formula_path, formula)
+
+    // Push tap
+    print("Pushing tap...")
+    tap = "{repo}/{tap_path}"
+    $`git -C {tap} add Formula/beagle.rb`
+    $`git -C {tap} commit -m "beagle {release}"`
+    $`git -C {tap} push`
+
+    print("Done! {tag} released.")
