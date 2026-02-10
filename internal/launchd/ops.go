@@ -1,6 +1,7 @@
 package launchd
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -58,6 +59,9 @@ func ReadLogs(f config.File, jobID string, stderr bool, tailLines int, opts OpsO
 	path := core.LogFilePath(uc.HomeDir, namespace, jobID, stream)
 	b, err := os.ReadFile(path)
 	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			return "", nil
+		}
 		return "", err
 	}
 	text := string(b)
