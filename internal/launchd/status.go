@@ -4,12 +4,11 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/user"
-	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/amterp/beagle/internal/config"
+	"github.com/amterp/beagle/internal/core"
 )
 
 type OutputRunner func(name string, args ...string) (string, error)
@@ -43,18 +42,18 @@ func List(f config.File, opts StatusOptions) ([]JobStatus, error) {
 	if err != nil {
 		return nil, err
 	}
-	uid, username, home, outRunner, err := statusContext(opts)
+
+	uc, outRunner, err := statusContext(opts)
 	if err != nil {
 		return nil, err
 	}
 
-	launchDir := filepath.Join(home, "Library", "LaunchAgents")
+	namespace := core.NormalizeNamespace(opts.Namespace)
 	items := make([]JobStatus, 0, len(resolved))
-	namespace := normalizeNamespace(opts.Namespace)
 	for _, j := range resolved {
-		label := fmt.Sprintf("com.beagle.%s.%s.%s", username, namespace, j.ID)
-		plist := filepath.Join(launchDir, label+".plist")
-		raw, loaded, disabled := inspectLabel(outRunner, uid, label)
+		label := core.BuildLabel(uc.Username, namespace, j.ID)
+		plist := core.PlistPath(uc.HomeDir, label)
+		raw, loaded, disabled := inspectLabel(outRunner, uc.UID, label)
 		items = append(items, JobStatus{
 			ID:       j.ID,
 			Type:     j.Type,
@@ -100,7 +99,7 @@ func Doctor(opts StatusOptions) (DoctorReport, error) {
 		report.Issues = append(report.Issues, "home directory is missing or inaccessible")
 	}
 
-	launchDir := filepath.Join(home, "Library", "LaunchAgents")
+	launchDir := core.LaunchAgentsDir(home)
 	if st, err := os.Stat(launchDir); err == nil && st.IsDir() {
 		report.LaunchAgentsOK = true
 	} else {
@@ -120,25 +119,16 @@ func Doctor(opts StatusOptions) (DoctorReport, error) {
 	return report, nil
 }
 
-func statusContext(opts StatusOptions) (uid string, username string, home string, outRunner OutputRunner, err error) {
-	u, err := user.Current()
+func statusContext(opts StatusOptions) (uc core.UserContext, outRunner OutputRunner, err error) {
+	uc, err = core.CurrentUserWithHome(opts.HomeDir)
 	if err != nil {
-		return "", "", "", nil, fmt.Errorf("current user: %w", err)
-	}
-	uid = u.Uid
-	username = sanitizeLabelPart(u.Username)
-	home = opts.HomeDir
-	if home == "" {
-		home, err = os.UserHomeDir()
-		if err != nil {
-			return "", "", "", nil, err
-		}
+		return core.UserContext{}, nil, err
 	}
 	outRunner = opts.RunOut
 	if outRunner == nil {
 		outRunner = execOutput
 	}
-	return uid, username, home, outRunner, nil
+	return uc, outRunner, nil
 }
 
 func inspectLabel(runOut OutputRunner, uid string, label string) (raw string, loaded bool, disabled bool) {

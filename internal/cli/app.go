@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/amterp/beagle/internal/config"
+	"github.com/amterp/beagle/internal/core"
 	"github.com/amterp/beagle/internal/launchd"
 	"github.com/amterp/beagle/internal/profile"
 	"github.com/amterp/beagle/internal/runlog"
@@ -481,7 +482,7 @@ func (a *App) runProfileUse(name string) error {
 }
 
 func (a *App) resolveJobContext(configPath string, profileName string, rawJob string) (commandContext, string, error) {
-	selectorProfile, jobID := splitJobSelector(rawJob)
+	selectorProfile, jobID := core.SplitJobSelector(rawJob)
 	if jobID == "" {
 		return commandContext{}, "", fmt.Errorf("job id is required")
 	}
@@ -497,7 +498,7 @@ func (a *App) resolveJobContext(configPath string, profileName string, rawJob st
 }
 
 func (a *App) resolveOptionalJobContext(configPath string, profileName string, rawJob string) (commandContext, string, error) {
-	selectorProfile, jobID := splitJobSelector(rawJob)
+	selectorProfile, jobID := core.SplitJobSelector(rawJob)
 	override := profileName
 	if selectorProfile != "" {
 		override = selectorProfile
@@ -524,7 +525,7 @@ func (a *App) resolveContext(configPath string, profileName string) (commandCont
 		if err != nil {
 			return commandContext{}, fmt.Errorf("resolve config path: %w", err)
 		}
-		ctx := commandContext{ConfigPath: abs, Namespace: profile.NamespaceFromPath(abs)}
+		ctx := commandContext{ConfigPath: abs, Namespace: core.NamespaceFromPath(abs)}
 		if profileName != "" {
 			entry, ok := registry.Profiles[profileName]
 			if !ok {
@@ -559,7 +560,7 @@ func (a *App) resolveContext(configPath string, profileName string) (commandCont
 		return commandContext{}, err
 	}
 	cfg := filepath.Join(wd, "beagle.yaml")
-	return commandContext{ConfigPath: cfg, Namespace: profile.NamespaceFromPath(cfg)}, nil
+	return commandContext{ConfigPath: cfg, Namespace: core.NamespaceFromPath(cfg)}, nil
 }
 
 func loadRegistry() (string, profile.Registry, error) {
@@ -572,16 +573,4 @@ func loadRegistry() (string, profile.Registry, error) {
 		return "", profile.Registry{}, err
 	}
 	return path, r, nil
-}
-
-func splitJobSelector(raw string) (string, string) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", ""
-	}
-	parts := strings.SplitN(raw, ":", 2)
-	if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
-		return "", raw
-	}
-	return profile.NormalizeName(parts[0]), parts[1]
 }

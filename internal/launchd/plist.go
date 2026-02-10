@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"github.com/amterp/beagle/internal/config"
+	"github.com/amterp/beagle/internal/core"
 )
 
 type JobSpec struct {
@@ -20,15 +21,12 @@ type JobSpec struct {
 	Type        string
 	Restart     string
 	ThrottleSec int
-	Calendar    *Calendar
+	Calendars   []Calendar
 	Timezone    string
 }
 
 func BuildSpec(label string, rj config.ResolvedJob, runnerPath string, stdoutPath string, stderrPath string, namespace string) (JobSpec, error) {
-	jobKey := rj.ID
-	if namespace != "" {
-		jobKey = namespace + ":" + rj.ID
-	}
+	jobKey := core.BuildJobKey(namespace, rj.ID)
 	spec := JobSpec{
 		Label:       label,
 		ProgramArgs: append([]string{runnerPath, "--job", rj.ID, "--job-key", jobKey, "--namespace", namespace, "--"}, rj.Command...),
@@ -59,11 +57,11 @@ func BuildSpec(label string, rj config.ResolvedJob, runnerPath string, stdoutPat
 	}
 
 	if rj.Type == "schedule" {
-		cal, err := ParseCron(rj.Schedule.Cron)
+		cals, err := ParseCron(rj.Schedule.Cron)
 		if err != nil {
 			return JobSpec{}, fmt.Errorf("parse cron for %s: %w", rj.ID, err)
 		}
-		spec.Calendar = &cal
+		spec.Calendars = cals
 	}
 
 	return spec, nil
@@ -128,25 +126,17 @@ func RenderPlist(spec JobSpec) (string, error) {
 		}
 	}
 
-	if spec.Type == "schedule" && spec.Calendar != nil {
+	if spec.Type == "schedule" && len(spec.Calendars) > 0 {
 		b.WriteString("  <key>StartCalendarInterval</key>\n")
-		b.WriteString("  <dict>\n")
-		if spec.Calendar.Minute != nil {
-			writeDictInt(&b, "Minute", *spec.Calendar.Minute)
+		if len(spec.Calendars) == 1 {
+			renderCalendarDict(&b, spec.Calendars[0], "  ")
+		} else {
+			b.WriteString("  <array>\n")
+			for _, cal := range spec.Calendars {
+				renderCalendarDict(&b, cal, "    ")
+			}
+			b.WriteString("  </array>\n")
 		}
-		if spec.Calendar.Hour != nil {
-			writeDictInt(&b, "Hour", *spec.Calendar.Hour)
-		}
-		if spec.Calendar.Day != nil {
-			writeDictInt(&b, "Day", *spec.Calendar.Day)
-		}
-		if spec.Calendar.Month != nil {
-			writeDictInt(&b, "Month", *spec.Calendar.Month)
-		}
-		if spec.Calendar.Weekday != nil {
-			writeDictInt(&b, "Weekday", *spec.Calendar.Weekday)
-		}
-		b.WriteString("  </dict>\n")
 	}
 
 	if spec.Timezone != "" {
@@ -163,6 +153,27 @@ func RenderPlist(spec JobSpec) (string, error) {
 	b.WriteString("</plist>\n")
 
 	return b.String(), nil
+}
+
+func renderCalendarDict(b *bytes.Buffer, cal Calendar, indent string) {
+	b.WriteString(indent + "<dict>\n")
+	inner := indent + "  "
+	if cal.Minute != nil {
+		writeDictIntAt(b, inner, "Minute", *cal.Minute)
+	}
+	if cal.Hour != nil {
+		writeDictIntAt(b, inner, "Hour", *cal.Hour)
+	}
+	if cal.Day != nil {
+		writeDictIntAt(b, inner, "Day", *cal.Day)
+	}
+	if cal.Month != nil {
+		writeDictIntAt(b, inner, "Month", *cal.Month)
+	}
+	if cal.Weekday != nil {
+		writeDictIntAt(b, inner, "Weekday", *cal.Weekday)
+	}
+	b.WriteString(indent + "</dict>\n")
 }
 
 func writeKeyString(b *bytes.Buffer, key string, value string) {
@@ -211,6 +222,15 @@ func writeDictInt(b *bytes.Buffer, key string, value int) {
 	b.WriteString(escape(key))
 	b.WriteString("</key>\n")
 	b.WriteString("    <integer>")
+	b.WriteString(fmt.Sprintf("%d", value))
+	b.WriteString("</integer>\n")
+}
+
+func writeDictIntAt(b *bytes.Buffer, indent string, key string, value int) {
+	b.WriteString(indent + "<key>")
+	b.WriteString(escape(key))
+	b.WriteString("</key>\n")
+	b.WriteString(indent + "<integer>")
 	b.WriteString(fmt.Sprintf("%d", value))
 	b.WriteString("</integer>\n")
 }

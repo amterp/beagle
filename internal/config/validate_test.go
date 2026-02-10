@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestValidateValidFile(t *testing.T) {
 	f := File{
@@ -54,5 +57,118 @@ func TestValidateRejectsInvalidConfig(t *testing.T) {
 
 	if err := Validate(f); err == nil {
 		t.Fatal("expected validation error")
+	}
+}
+
+func TestValidateSingleCharJobID(t *testing.T) {
+	f := File{
+		Version: CurrentVersion,
+		Jobs: Jobs{
+			"a": {
+				Type:    "service",
+				Command: []string{"/bin/echo"},
+			},
+		},
+	}
+	if err := Validate(f); err != nil {
+		t.Fatalf("single-char job ID should be valid: %v", err)
+	}
+}
+
+func TestResolvePartialBreakerNoDefaultsRejected(t *testing.T) {
+	// A job with only some breaker fields and no defaults to fill the gaps
+	// should be rejected during resolution.
+	f := File{
+		Version: CurrentVersion,
+		Jobs: Jobs{
+			"worker_a": {
+				Type:    "service",
+				Command: []string{"/bin/echo"},
+				CircuitBreaker: CircuitBreaker{
+					MaxFailures: 5,
+					// WindowSeconds and CooldownSeconds missing, no defaults
+				},
+			},
+		},
+	}
+	_, err := Resolve(f)
+	if err == nil {
+		t.Fatal("expected error for partial breaker with no defaults")
+	}
+	if !strings.Contains(err.Error(), "all three") {
+		t.Fatalf("expected all-or-nothing error, got: %v", err)
+	}
+}
+
+func TestResolvePartialBreakerWithDefaultsPasses(t *testing.T) {
+	// A job can set some breaker fields and inherit the rest from defaults.
+	f := File{
+		Version: CurrentVersion,
+		Defaults: Defaults{
+			CircuitBreaker: CircuitBreaker{
+				MaxFailures:     3,
+				WindowSeconds:   300,
+				CooldownSeconds: 900,
+			},
+		},
+		Jobs: Jobs{
+			"worker_a": {
+				Type:    "service",
+				Command: []string{"/bin/echo"},
+				CircuitBreaker: CircuitBreaker{
+					MaxFailures: 10,
+					// Inherits WindowSeconds and CooldownSeconds from defaults
+				},
+			},
+		},
+	}
+	jobs, err := Resolve(f)
+	if err != nil {
+		t.Fatalf("partial breaker + defaults should resolve: %v", err)
+	}
+	if jobs[0].CircuitBreaker.MaxFailures != 10 {
+		t.Fatalf("expected max_failures=10, got %d", jobs[0].CircuitBreaker.MaxFailures)
+	}
+	if jobs[0].CircuitBreaker.WindowSeconds != 300 {
+		t.Fatalf("expected window_seconds=300, got %d", jobs[0].CircuitBreaker.WindowSeconds)
+	}
+}
+
+func TestResolveFullBreakerPasses(t *testing.T) {
+	f := File{
+		Version: CurrentVersion,
+		Jobs: Jobs{
+			"worker_a": {
+				Type:    "service",
+				Command: []string{"/bin/echo"},
+				CircuitBreaker: CircuitBreaker{
+					MaxFailures:     5,
+					WindowSeconds:   600,
+					CooldownSeconds: 1800,
+				},
+			},
+		},
+	}
+	if _, err := Resolve(f); err != nil {
+		t.Fatalf("full breaker should resolve: %v", err)
+	}
+}
+
+func TestValidateEmptyCommandZeroRejected(t *testing.T) {
+	f := File{
+		Version: CurrentVersion,
+		Jobs: Jobs{
+			"worker_a": {
+				Type:    "service",
+				Command: []string{"  "},
+			},
+		},
+	}
+	err := Validate(f)
+	if err == nil {
+		t.Fatal("expected validation error for empty command[0]")
+	}
+	if !strings.Contains(err.Error(), "must not be empty") {
+		t.Fatalf("expected empty command error, got: %v", err)
 	}
 }

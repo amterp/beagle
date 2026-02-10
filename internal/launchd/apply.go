@@ -4,12 +4,12 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
-	"os/user"
 	"path/filepath"
 	"sort"
 	"strings"
 
 	"github.com/amterp/beagle/internal/config"
+	"github.com/amterp/beagle/internal/core"
 )
 
 type CommandRunner interface {
@@ -47,16 +47,14 @@ func Apply(f config.File, opts ApplyOptions) (Summary, error) {
 		return Summary{}, err
 	}
 
-	home := opts.HomeDir
-	if home == "" {
-		home, err = os.UserHomeDir()
-		if err != nil {
-			return Summary{}, err
-		}
+	uc, err := core.CurrentUserWithHome(opts.HomeDir)
+	if err != nil {
+		return Summary{}, err
 	}
-	launchDir := filepath.Join(home, "Library", "LaunchAgents")
-	namespace := normalizeNamespace(opts.Namespace)
-	logsRoot := filepath.Join(home, ".local", "share", "beagle", "logs", namespace)
+
+	namespace := core.NormalizeNamespace(opts.Namespace)
+	launchDir := core.LaunchAgentsDir(uc.HomeDir)
+	logsRoot := core.LogsDir(uc.HomeDir, namespace)
 
 	if err := os.MkdirAll(launchDir, 0o755); err != nil {
 		return Summary{}, fmt.Errorf("create launch agents dir: %w", err)
@@ -79,20 +77,13 @@ func Apply(f config.File, opts ApplyOptions) (Summary, error) {
 		runner = ExecRunner{}
 	}
 
-	u, err := user.Current()
-	if err != nil {
-		return Summary{}, fmt.Errorf("current user: %w", err)
-	}
-	uid := u.Uid
-	username := sanitizeLabelPart(u.Username)
-
 	desired := map[string]string{}
 	desiredLabels := map[string]string{}
 	for _, job := range jobs {
-		label := fmt.Sprintf("com.beagle.%s.%s.%s", username, namespace, job.ID)
-		plistPath := filepath.Join(launchDir, label+".plist")
-		stdoutPath := filepath.Join(logsRoot, job.ID, "stdout.log")
-		stderrPath := filepath.Join(logsRoot, job.ID, "stderr.log")
+		label := core.BuildLabel(uc.Username, namespace, job.ID)
+		plistPath := core.PlistPath(uc.HomeDir, label)
+		stdoutPath := core.LogFilePath(uc.HomeDir, namespace, job.ID, "stdout")
+		stderrPath := core.LogFilePath(uc.HomeDir, namespace, job.ID, "stderr")
 		if err := os.MkdirAll(filepath.Dir(stdoutPath), 0o755); err != nil {
 			return Summary{}, fmt.Errorf("create logs for %s: %w", job.ID, err)
 		}
@@ -109,7 +100,7 @@ func Apply(f config.File, opts ApplyOptions) (Summary, error) {
 		desiredLabels[plistPath] = label
 	}
 
-	managedPattern := filepath.Join(launchDir, fmt.Sprintf("com.beagle.%s.%s.*.plist", username, namespace))
+	managedPattern := core.ManagedGlob(uc.HomeDir, uc.Username, namespace)
 	existing, err := filepath.Glob(managedPattern)
 	if err != nil {
 		return Summary{}, fmt.Errorf("glob managed plists: %w", err)
@@ -127,7 +118,7 @@ func Apply(f config.File, opts ApplyOptions) (Summary, error) {
 			continue
 		}
 		label := strings.TrimSuffix(filepath.Base(path), ".plist")
-		_ = runner.Run("launchctl", "bootout", "gui/"+uid+"/"+label)
+		_ = runner.Run("launchctl", "bootout", "gui/"+uc.UID+"/"+label)
 		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
 			summary.Errors = append(summary.Errors, fmt.Sprintf("remove %s: %v", path, err))
 			continue
@@ -153,19 +144,33 @@ func Apply(f config.File, opts ApplyOptions) (Summary, error) {
 		}
 
 		if exists && string(current) == content {
-			summary.Unchanged++
+			// Plist content matches, but the job might not actually be loaded
+			// (e.g. a previous bootstrap failed or was manually unloaded).
+			// Check and re-bootstrap if needed.
+			if isJobLoaded(runner, uc.UID, label) {
+				summary.Unchanged++
+				continue
+			}
+			// Best-effort bootout first to clear any stale launchd state,
+			// matching the normal update path below.
+			_ = runner.Run("launchctl", "bootout", "gui/"+uc.UID+"/"+label)
+			if err := runner.Run("launchctl", "bootstrap", "gui/"+uc.UID, path); err != nil {
+				summary.Errors = append(summary.Errors, fmt.Sprintf("re-bootstrap %s: %v", label, err))
+			} else {
+				summary.Updated++
+			}
 			continue
 		}
 
 		if exists {
-			_ = runner.Run("launchctl", "bootout", "gui/"+uid+"/"+label)
+			_ = runner.Run("launchctl", "bootout", "gui/"+uc.UID+"/"+label)
 		}
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			summary.Errors = append(summary.Errors, fmt.Sprintf("write %s: %v", path, err))
 			continue
 		}
 
-		if err := runner.Run("launchctl", "bootstrap", "gui/"+uid, path); err != nil {
+		if err := runner.Run("launchctl", "bootstrap", "gui/"+uc.UID, path); err != nil {
 			summary.Errors = append(summary.Errors, fmt.Sprintf("bootstrap %s: %v", label, err))
 		} else if exists {
 			summary.Updated++
@@ -180,20 +185,13 @@ func Apply(f config.File, opts ApplyOptions) (Summary, error) {
 	return summary, nil
 }
 
-func sanitizeLabelPart(s string) string {
-	s = strings.ReplaceAll(s, " ", "_")
-	s = strings.ReplaceAll(s, ".", "_")
-	return strings.ToLower(s)
-}
-
-func normalizeNamespace(namespace string) string {
-	ns := strings.TrimSpace(strings.ToLower(namespace))
-	if ns == "" {
-		return "default"
-	}
-	ns = strings.ReplaceAll(ns, " ", "_")
-	ns = strings.ReplaceAll(ns, ".", "_")
-	return ns
+// isJobLoaded checks whether a launchd job is currently loaded by running
+// "launchctl print". We use the CommandRunner interface so tests can stub this.
+func isJobLoaded(runner CommandRunner, uid string, label string) bool {
+	// "launchctl print" exits 0 if the service is loaded, non-zero otherwise.
+	// Using the runner so tests with fakeRunner can control this behavior.
+	err := runner.Run("launchctl", "print", "gui/"+uid+"/"+label)
+	return err == nil
 }
 
 func resolveRunnerPath(path string) (string, error) {

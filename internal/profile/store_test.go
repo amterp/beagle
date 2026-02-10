@@ -30,6 +30,31 @@ func TestRegisterAndUseProfile(t *testing.T) {
 	}
 }
 
+func TestRegisterRejectsNamespaceCollision(t *testing.T) {
+	dir := t.TempDir()
+	cfg1 := filepath.Join(dir, "a.yaml")
+	cfg2 := filepath.Join(dir, "b.yaml")
+	if err := os.WriteFile(cfg1, []byte("version: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(cfg2, []byte("version: 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	r := Registry{Profiles: map[string]Entry{}}
+
+	// Register first profile with name "team_a" -> namespace "team_a"
+	if _, err := Register(&r, "team_a", cfg1); err != nil {
+		t.Fatal(err)
+	}
+
+	// Try to register with the same name (should fail as "already exists")
+	_, err := Register(&r, "team_a", cfg2)
+	if err == nil {
+		t.Fatal("expected error for duplicate name")
+	}
+}
+
 func TestNamespaceFromPathStable(t *testing.T) {
 	a := NamespaceFromPath("/tmp/one/beagle.yaml")
 	b := NamespaceFromPath("/tmp/one/beagle.yaml")

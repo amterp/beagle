@@ -41,6 +41,10 @@ func Resolve(f File) ([]ResolvedJob, error) {
 			tz = f.Defaults.Timezone
 		}
 
+		// NOTE: ThrottleSeconds and CircuitBreaker fields use 0 as "unset",
+		// which means a user cannot explicitly override a default to 0.
+		// Migrating to *int pointers would fix this but is a larger change
+		// that should be done separately.
 		throttleSeconds := job.ThrottleSeconds
 		if throttleSeconds == 0 {
 			throttleSeconds = f.Defaults.ThrottleSeconds
@@ -55,6 +59,15 @@ func Resolve(f File) ([]ResolvedJob, error) {
 		}
 		if breaker.CooldownSeconds == 0 {
 			breaker.CooldownSeconds = f.Defaults.CircuitBreaker.CooldownSeconds
+		}
+
+		// All-or-nothing check on the merged breaker config. This runs after
+		// defaults are merged so that a job can set e.g. max_failures and
+		// inherit window_seconds + cooldown_seconds from defaults.
+		anyBreakerSet := breaker.MaxFailures > 0 || breaker.WindowSeconds > 0 || breaker.CooldownSeconds > 0
+		allBreakerSet := breaker.MaxFailures > 0 && breaker.WindowSeconds > 0 && breaker.CooldownSeconds > 0
+		if anyBreakerSet && !allBreakerSet {
+			return nil, fmt.Errorf("jobs.%s.circuit_breaker: if any field is set, all three (max_failures, window_seconds, cooldown_seconds) must be positive", id)
 		}
 
 		env := map[string]string{}
@@ -79,10 +92,6 @@ func Resolve(f File) ([]ResolvedJob, error) {
 			},
 			Throttle:       time.Duration(throttleSeconds) * time.Second,
 			CircuitBreaker: breaker,
-		}
-
-		if resolved.Type == "schedule" && strings.TrimSpace(resolved.Schedule.Cron) == "" {
-			return nil, fmt.Errorf("job %s is schedule without cron", id)
 		}
 
 		jobs = append(jobs, resolved)

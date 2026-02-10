@@ -10,7 +10,9 @@ import (
 )
 
 var (
-	jobIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{1,63}$`)
+	// Job IDs: 1-64 chars. First char [a-z0-9], rest [a-z0-9_-].
+	// The tail quantifier is {0,63} (not {1,63}) to allow single-char IDs.
+	jobIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9_-]{0,63}$`)
 	cronPattern  = regexp.MustCompile(`^\S+\s+\S+\s+\S+\s+\S+\s+\S+$`)
 )
 
@@ -53,6 +55,8 @@ func Validate(f File) error {
 
 		if len(job.Command) == 0 {
 			errs = append(errs, fmt.Sprintf("jobs.%s.command must be non-empty", id))
+		} else if strings.TrimSpace(job.Command[0]) == "" {
+			errs = append(errs, fmt.Sprintf("jobs.%s.command[0] must not be empty", id))
 		} else if !filepath.IsAbs(job.Command[0]) {
 			errs = append(errs, fmt.Sprintf("jobs.%s.command[0] must be an absolute path", id))
 		}
@@ -109,4 +113,7 @@ func validateBreaker(prefix string, b CircuitBreaker, errs *[]string) {
 	if b.CooldownSeconds < 0 {
 		*errs = append(*errs, prefix+".cooldown_seconds must be >= 0")
 	}
+	// Note: the all-or-nothing semantic check (if any field is set, all three
+	// must be positive) runs in Resolve() after defaults are merged, so that
+	// partial job-level overrides can inherit remaining fields from defaults.
 }

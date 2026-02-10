@@ -1,8 +1,6 @@
 package profile
 
 import (
-	"crypto/sha1"
-	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -10,6 +8,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/amterp/beagle/internal/core"
 	"gopkg.in/yaml.v3"
 )
 
@@ -30,7 +29,7 @@ func DefaultPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".config", "beagle", "profiles.yaml"), nil
+	return core.ProfileRegistryPath(home), nil
 }
 
 func Load(path string) (Registry, error) {
@@ -89,38 +88,10 @@ func NamespaceFromName(name string) (string, error) {
 	return name, nil
 }
 
+// NamespaceFromPath delegates to core.NamespaceFromPath for hash-based
+// namespace derivation from a config file path.
 func NamespaceFromPath(path string) string {
-	clean := filepath.Clean(path)
-	h := sha1.Sum([]byte(clean))
-	suffix := hex.EncodeToString(h[:])[:10]
-	base := sanitizeNamespace(filepath.Base(filepath.Dir(clean)))
-	if base == "" {
-		base = "cfg"
-	}
-	return fmt.Sprintf("%s-%s", base, suffix)
-}
-
-func sanitizeNamespace(in string) string {
-	in = strings.ToLower(strings.TrimSpace(in))
-	if in == "" {
-		return ""
-	}
-	var b strings.Builder
-	for _, r := range in {
-		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '_' || r == '-' {
-			b.WriteRune(r)
-			continue
-		}
-		b.WriteByte('-')
-	}
-	out := strings.Trim(b.String(), "-_")
-	if out == "" {
-		return ""
-	}
-	if len(out) > 32 {
-		out = out[:32]
-	}
-	return out
+	return core.NamespaceFromPath(path)
 }
 
 func Register(r *Registry, name string, configPath string) (Entry, error) {
@@ -147,6 +118,14 @@ func Register(r *Registry, name string, configPath string) (Entry, error) {
 		}
 	}
 	ns, _ := NamespaceFromName(name)
+
+	// Reject namespace collisions across profiles
+	for other, entry := range r.Profiles {
+		if entry.Namespace == ns && other != name {
+			return Entry{}, fmt.Errorf("namespace %q conflicts with profile %s", ns, other)
+		}
+	}
+
 	entry := Entry{ConfigPath: abs, Namespace: ns}
 	r.Profiles[name] = entry
 	if r.Active == "" {

@@ -6,9 +6,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"time"
 
+	"github.com/amterp/beagle/internal/core"
 	_ "modernc.org/sqlite"
 )
 
@@ -62,6 +62,13 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 
+	// WAL mode prevents "database is locked" when beagle-run and the CLI
+	// access the database concurrently.
+	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set WAL mode: %w", err)
+	}
+
 	s := &Store{db: db}
 	if err := s.migrate(context.Background()); err != nil {
 		_ = db.Close()
@@ -75,7 +82,7 @@ func DefaultPath() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	return filepath.Join(home, ".local", "share", "beagle", "beagle.db"), nil
+	return core.RunlogDBPath(home), nil
 }
 
 func (s *Store) Close() error {
@@ -102,6 +109,9 @@ VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL, NULL, 'running', NULL, NULL, ?)
 }
 
 func (s *Store) FinishRun(ctx context.Context, f RunFinish) error {
+	// Compute duration from the stored start time. If the clock has drifted
+	// backwards (e.g. NTP correction) producing a negative duration, we
+	// record 0 rather than a misleading negative value.
 	durationMs := int64(0)
 	if !f.Finished.IsZero() {
 		var startedRaw string
@@ -125,10 +135,12 @@ WHERE id = ?
 	}
 
 	if f.Status == "failed" {
-		_, _ = s.db.ExecContext(ctx, `
+		if _, err := s.db.ExecContext(ctx, `
 INSERT INTO events(ts, job_id, job_key, namespace, level, event_type, message)
 SELECT ?, job_id, job_key, namespace, 'error', 'run_failed', ? FROM runs WHERE id = ?
-`, f.Finished.UTC().Format(time.RFC3339Nano), fmt.Sprintf("run failed: exit=%d signal=%s", f.ExitCode, f.TermSignal), f.ID)
+`, f.Finished.UTC().Format(time.RFC3339Nano), fmt.Sprintf("run failed: exit=%d signal=%s", f.ExitCode, f.TermSignal), f.ID); err != nil {
+			return fmt.Errorf("record failure event: %w", err)
+		}
 	}
 
 	return nil
@@ -241,6 +253,7 @@ func (s *Store) RecordOutcome(ctx context.Context, jobKey string, now time.Time,
 		openUntil = now.Add(time.Duration(policy.CooldownSeconds) * time.Second)
 	}
 
+	ns, jobID := core.SplitJobKey(jobKey)
 	_, err = tx.ExecContext(ctx, `
 INSERT INTO breaker_state(job_key, job_id, namespace, failure_count, window_started_at, open_until, updated_at)
 VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -249,7 +262,7 @@ ON CONFLICT(job_key) DO UPDATE SET
 	window_started_at = excluded.window_started_at,
 	open_until = excluded.open_until,
 	updated_at = excluded.updated_at
-`, jobKey, splitJobKey(jobKey), splitNamespace(jobKey), st.count, windowFrom.UTC().Format(time.RFC3339Nano), openUntil.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano))
+`, jobKey, jobID, ns, st.count, windowFrom.UTC().Format(time.RFC3339Nano), openUntil.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return err
 	}
@@ -305,6 +318,9 @@ func (s *Store) migrate(ctx context.Context) error {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
+
+	// SAFETY: table/column names below are always hardcoded string literals,
+	// never user input. Double-quoted identifiers are defense-in-depth.
 	if err := s.ensureColumn(ctx, "runs", "job_key", "TEXT NOT NULL DEFAULT ''"); err != nil {
 		return err
 	}
@@ -326,8 +342,11 @@ func (s *Store) migrate(ctx context.Context) error {
 	return nil
 }
 
+// ensureColumn adds a column to a table if it doesn't already exist.
+// SAFETY: table and col must be hardcoded constants, never user input.
+// Identifiers are double-quoted for defense-in-depth.
 func (s *Store) ensureColumn(ctx context.Context, table string, col string, def string) error {
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info(%s)`, table))
+	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info("%s")`, table))
 	if err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
@@ -352,7 +371,7 @@ func (s *Store) ensureColumn(ctx context.Context, table string, col string, def 
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
-	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE %s ADD COLUMN %s %s`, table, col, def)); err != nil {
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE "%s" ADD COLUMN "%s" %s`, table, col, def)); err != nil {
 		return fmt.Errorf("migrate: %w", err)
 	}
 	return nil
@@ -411,20 +430,4 @@ func (s *Store) migrateBreakerState(ctx context.Context) error {
 		}
 	}
 	return nil
-}
-
-func splitNamespace(jobKey string) string {
-	parts := strings.SplitN(jobKey, ":", 2)
-	if len(parts) != 2 {
-		return ""
-	}
-	return parts[0]
-}
-
-func splitJobKey(jobKey string) string {
-	parts := strings.SplitN(jobKey, ":", 2)
-	if len(parts) != 2 {
-		return jobKey
-	}
-	return parts[1]
 }

@@ -3,12 +3,10 @@ package launchd
 import (
 	"fmt"
 	"os"
-	"os/exec"
-	"os/user"
-	"path/filepath"
 	"strings"
 
 	"github.com/amterp/beagle/internal/config"
+	"github.com/amterp/beagle/internal/core"
 )
 
 type OpsOptions struct {
@@ -18,28 +16,28 @@ type OpsOptions struct {
 }
 
 func RunNow(f config.File, jobID string, opts OpsOptions) error {
-	uid, label, _, runner, err := jobRuntimeContext(f, jobID, opts)
+	uc, label, _, runner, err := jobRuntimeContext(f, jobID, opts)
 	if err != nil {
 		return err
 	}
-	return runner.Run("launchctl", "kickstart", "-k", "gui/"+uid+"/"+label)
+	return runner.Run("launchctl", "kickstart", "-k", "gui/"+uc.UID+"/"+label)
 }
 
 func Enable(f config.File, jobID string, opts OpsOptions) error {
-	uid, label, plistPath, runner, err := jobRuntimeContext(f, jobID, opts)
+	uc, label, plistPath, runner, err := jobRuntimeContext(f, jobID, opts)
 	if err != nil {
 		return err
 	}
-	_ = runner.Run("launchctl", "bootout", "gui/"+uid+"/"+label)
-	return runner.Run("launchctl", "bootstrap", "gui/"+uid, plistPath)
+	_ = runner.Run("launchctl", "bootout", "gui/"+uc.UID+"/"+label)
+	return runner.Run("launchctl", "bootstrap", "gui/"+uc.UID, plistPath)
 }
 
 func Disable(f config.File, jobID string, opts OpsOptions) error {
-	uid, label, _, runner, err := jobRuntimeContext(f, jobID, opts)
+	uc, label, _, runner, err := jobRuntimeContext(f, jobID, opts)
 	if err != nil {
 		return err
 	}
-	return runner.Run("launchctl", "bootout", "gui/"+uid+"/"+label)
+	return runner.Run("launchctl", "bootout", "gui/"+uc.UID+"/"+label)
 }
 
 func ReadLogs(f config.File, jobID string, stderr bool, tailLines int, opts OpsOptions) (string, error) {
@@ -48,19 +46,16 @@ func ReadLogs(f config.File, jobID string, stderr bool, tailLines int, opts OpsO
 		return "", err
 	}
 
-	home := opts.HomeDir
-	if home == "" {
-		home, err = os.UserHomeDir()
-		if err != nil {
-			return "", err
-		}
+	uc, err := core.CurrentUserWithHome(opts.HomeDir)
+	if err != nil {
+		return "", err
 	}
-	name := "stdout.log"
+	stream := "stdout"
 	if stderr {
-		name = "stderr.log"
+		stream = "stderr"
 	}
-	namespace := normalizeNamespace(opts.Namespace)
-	path := filepath.Join(home, ".local", "share", "beagle", "logs", namespace, jobID, name)
+	namespace := core.NormalizeNamespace(opts.Namespace)
+	path := core.LogFilePath(uc.HomeDir, namespace, jobID, stream)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return "", err
@@ -76,37 +71,21 @@ func ReadLogs(f config.File, jobID string, stderr bool, tailLines int, opts OpsO
 	return text, nil
 }
 
-func jobRuntimeContext(f config.File, jobID string, opts OpsOptions) (uid string, label string, plistPath string, runner CommandRunner, err error) {
-	u, err := user.Current()
+func jobRuntimeContext(f config.File, jobID string, opts OpsOptions) (uc core.UserContext, label string, plistPath string, runner CommandRunner, err error) {
+	uc, err = core.CurrentUserWithHome(opts.HomeDir)
 	if err != nil {
-		return "", "", "", nil, err
-	}
-	home := opts.HomeDir
-	if home == "" {
-		home, err = os.UserHomeDir()
-		if err != nil {
-			return "", "", "", nil, err
-		}
+		return core.UserContext{}, "", "", nil, err
 	}
 	_, ok := f.Jobs[jobID]
 	if !ok {
-		return "", "", "", nil, fmt.Errorf("job not found: %s", jobID)
+		return core.UserContext{}, "", "", nil, fmt.Errorf("job not found: %s", jobID)
 	}
-	namespace := normalizeNamespace(opts.Namespace)
-	label = fmt.Sprintf("com.beagle.%s.%s.%s", sanitizeLabelPart(u.Username), namespace, jobID)
-	plistPath = filepath.Join(home, "Library", "LaunchAgents", label+".plist")
+	namespace := core.NormalizeNamespace(opts.Namespace)
+	label = core.BuildLabel(uc.Username, namespace, jobID)
+	plistPath = core.PlistPath(uc.HomeDir, label)
 	runner = opts.Runner
 	if runner == nil {
 		runner = ExecRunner{}
 	}
-	return u.Uid, label, plistPath, runner, nil
-}
-
-func TailFile(path string, tailLines int) (string, error) {
-	cmd := exec.Command("tail", "-n", fmt.Sprintf("%d", tailLines), path)
-	out, err := cmd.CombinedOutput()
-	if err == nil {
-		return string(out), nil
-	}
-	return "", err
+	return uc, label, plistPath, runner, nil
 }
