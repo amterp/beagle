@@ -1,0 +1,27 @@
+#!/usr/bin/env rad
+---
+Build script for Beagle.
+---
+args:
+    fmt f bool    # Format code
+    vet v bool    # Vet code
+    test t bool   # Run tests
+    build b bool  # Build binaries into ./bin/
+    check c bool  # Run fmt, vet, and test
+    clean bool    # Remove ./bin/
+
+if clean:
+    $`rm -rf ./bin`
+
+if fmt or check:
+    $`go fmt ./...`
+
+if vet or check:
+    $`go vet ./...`
+
+if test or check:
+    $`go test ./...`
+
+if build:
+    $`go build -o ./bin/beagle ./cmd/beagle`
+    $`go build -o ./bin/beagle-run ./cmd/beagle-run`

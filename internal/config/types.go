@@ -11,12 +11,12 @@ type File struct {
 }
 
 type Defaults struct {
-	WorkingDir      string         `yaml:"working_dir"`
+	WorkingDir      string            `yaml:"working_dir"`
 	Env             map[string]string `yaml:"env"`
-	LogsDir         string         `yaml:"logs_dir"`
-	Timezone        string         `yaml:"timezone"`
-	ThrottleSeconds int            `yaml:"throttle_seconds"`
-	CircuitBreaker  CircuitBreaker `yaml:"circuit_breaker"`
+	LogsDir         string            `yaml:"logs_dir"`
+	Timezone        string            `yaml:"timezone"`
+	ThrottleSeconds int               `yaml:"throttle_seconds"`
+	CircuitBreaker  CircuitBreaker    `yaml:"circuit_breaker"`
 }
 
 type Jobs map[string]Job
@@ -45,14 +45,14 @@ type CircuitBreaker struct {
 }
 
 type ResolvedJob struct {
-	ID            string
-	Type          string
-	Command       []string
-	WorkingDir    string
-	Env           map[string]string
-	Enabled       bool
-	Restart       string
-	Schedule      Schedule
-	Throttle      time.Duration
+	ID             string
+	Type           string
+	Command        []string
+	WorkingDir     string
+	Env            map[string]string
+	Enabled        bool
+	Restart        string
+	Schedule       Schedule
+	Throttle       time.Duration
 	CircuitBreaker CircuitBreaker
 }

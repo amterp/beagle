@@ -5,8 +5,8 @@ import (
 	"os"
 	"strings"
 
-	"github.com/amterp/beagle/internal/runner"
 	"github.com/amterp/beagle/internal/runlog"
+	"github.com/amterp/beagle/internal/runner"
 	"github.com/amterp/ra"
 )
 

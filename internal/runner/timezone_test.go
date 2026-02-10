@@ -1,8 +1,8 @@
 package runner
 
 import (
-	"time"
 	"testing"
+	"time"
 
 	"github.com/amterp/beagle/internal/launchd"
 )
