@@ -3,6 +3,7 @@ package runlog
 import (
 	"context"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -135,6 +136,76 @@ func TestForeignSchemaWiped(t *testing.T) {
 
 	if _, err := store.StartRun(context.Background(), RunStart{JobID: "j", Command: "c", PID: 1, Started: time.Now().UTC()}); err != nil {
 		t.Fatalf("StartRun on recreated schema failed: %v", err)
+	}
+}
+
+// TestConcurrentOpensSucceed mirrors normal operation: the supervisor holds an
+// open Store while it kicks a job, and beagle-run (plus any CLI command) opens
+// the same DB at the same moment. Before the busy_timeout + read-only
+// steady-state path, these raced the version write and failed with SQLITE_BUSY,
+// so the kicked job's command never ran.
+func TestConcurrentOpensSucceed(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "beagle.db")
+
+	// The supervisor's open creates the schema and keeps its connection.
+	supervisor, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("initial open: %v", err)
+	}
+	defer supervisor.Close()
+
+	const n = 8
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s, err := Open(dbPath)
+			if err != nil {
+				errs <- err
+				return
+			}
+			errs <- s.Close()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent open while supervisor holds the DB: %v", err)
+		}
+	}
+}
+
+// TestConcurrentColdOpensSucceed covers the first-boot race: several processes
+// (e.g. the supervisor and a `beagle apply` fired right after it) open a
+// brand-new DB simultaneously, each racing to create the schema. busy_timeout
+// makes the losers wait for the init write rather than failing with SQLITE_BUSY.
+func TestConcurrentColdOpensSucceed(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "beagle.db")
+
+	const n = 8
+	errs := make(chan error, n)
+	var wg sync.WaitGroup
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s, err := Open(dbPath)
+			if err != nil {
+				errs <- err
+				return
+			}
+			errs <- s.Close()
+		}()
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent cold open of a fresh DB: %v", err)
+		}
 	}
 }
 

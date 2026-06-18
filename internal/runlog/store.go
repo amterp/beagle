@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/amterp/beagle/internal/core"
@@ -63,9 +64,24 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 
-	// WAL mode prevents "database is locked" when beagle-run and the CLI
-	// access the database concurrently.
-	if _, err := db.Exec(`PRAGMA journal_mode=WAL`); err != nil {
+	// One connection per process. beagle-run, the CLI, and the supervisor each
+	// do light sequential DB work, so a single connection costs nothing and buys
+	// two things: the pragmas below apply to every statement (database/sql sets
+	// pragmas per-connection, so a pooled second connection would silently lack
+	// them), and there is no in-process writer contention to begin with.
+	db.SetMaxOpenConns(1)
+
+	// busy_timeout makes a contended writer wait for the lock instead of failing
+	// instantly with SQLITE_BUSY. Several beagle processes open this DB at once
+	// (the supervisor every minute, beagle-run when kicked, the CLI on demand)
+	// and WAL serializes writers rather than removing them.
+	if _, err := db.Exec(`PRAGMA busy_timeout=5000`); err != nil {
+		_ = db.Close()
+		return nil, fmt.Errorf("set busy timeout: %w", err)
+	}
+
+	// WAL lets readers and a single writer proceed without blocking each other.
+	if err := enableWAL(db); err != nil {
 		_ = db.Close()
 		return nil, fmt.Errorf("set WAL mode: %w", err)
 	}
@@ -76,6 +92,34 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+// enableWAL switches the database into WAL mode. The journal-mode transition
+// needs a brief exclusive lock and - unlike ordinary statements - does not
+// reliably honor busy_timeout, so when several processes open a fresh DB at
+// once the losers can see SQLITE_BUSY. The mode is persistent and idempotent (a
+// connection that finds the DB already in WAL just reads "wal" back without
+// re-acquiring the lock), so a short bounded retry converges quickly.
+func enableWAL(db *sql.DB) error {
+	var err error
+	for attempt := 0; attempt < 50; attempt++ {
+		if _, err = db.Exec(`PRAGMA journal_mode=WAL`); err == nil {
+			return nil
+		}
+		if !isLockedErr(err) {
+			return err
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	return err
+}
+
+func isLockedErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "SQLITE_BUSY") || strings.Contains(msg, "database is locked")
 }
 
 func DefaultPath() (string, error) {
@@ -364,20 +408,70 @@ func (s *Store) GetMeta(ctx context.Context, key string) (value string, updatedA
 	return valRaw, ts, true, nil
 }
 
+// migrate brings the DB up to schemaVersion. beagle keeps no run data worth
+// preserving across a schema change, so migration is replacement, not
+// transformation: a DB whose user_version doesn't match is wiped and recreated.
+// There is deliberately no ALTER-based upgrade path - any future schema change
+// must bump schemaVersion and add new tables to the drop set below, never
+// evolve an existing table in place.
 func (s *Store) migrate(ctx context.Context) error {
 	var userVersion int
 	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&userVersion); err != nil {
 		return fmt.Errorf("migrate: read schema version: %w", err)
 	}
 
+	// Already current: schema is in place and the version was stamped on a prior
+	// open. Skip every write so the common open path stays read-only - otherwise
+	// concurrent opens (supervisor + beagle-run + CLI) contend on the version
+	// write and fail with SQLITE_BUSY.
+	if userVersion == schemaVersion {
+		return nil
+	}
+
+	// A rebuild is needed (fresh or foreign DB). Serialize it across processes on
+	// one dedicated connection holding BEGIN IMMEDIATE: the write lock is taken
+	// up front (busy_timeout makes contenders wait), so two cold opens can't
+	// interleave their destructive DROP/CREATE and stomp each other's tables. The
+	// winner rebuilds and stamps the version; losers wait, re-check under the
+	// lock, and skip.
+	conn, err := s.db.Conn(ctx)
+	if err != nil {
+		return fmt.Errorf("migrate: acquire connection: %w", err)
+	}
+	defer conn.Close()
+
+	if _, err := conn.ExecContext(ctx, `BEGIN IMMEDIATE`); err != nil {
+		return fmt.Errorf("migrate: begin: %w", err)
+	}
+	if err := rebuildSchema(ctx, conn); err != nil {
+		_, _ = conn.ExecContext(ctx, `ROLLBACK`)
+		return err
+	}
+	if _, err := conn.ExecContext(ctx, `COMMIT`); err != nil {
+		return fmt.Errorf("migrate: commit: %w", err)
+	}
+	return nil
+}
+
+// rebuildSchema wipes and recreates the schema. It runs inside the caller's
+// BEGIN IMMEDIATE transaction, so it first re-reads the version under the lock:
+// a process that lost the race to migrate finds the version already current and
+// does nothing rather than dropping the winner's freshly built tables.
+func rebuildSchema(ctx context.Context, conn *sql.Conn) error {
+	var userVersion int
+	if err := conn.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&userVersion); err != nil {
+		return fmt.Errorf("migrate: read schema version: %w", err)
+	}
+	if userVersion == schemaVersion {
+		return nil
+	}
+
 	// A foreign schema (most importantly the pre-refactor namespaced layout)
 	// is wiped rather than migrated. Dropping then creating sidesteps the
 	// column-vs-index ordering hazards that bricked the old migrate path.
-	if userVersion != schemaVersion {
-		for _, table := range []string{"runs", "events", "breaker_state", "schedule_state"} {
-			if _, err := s.db.ExecContext(ctx, `DROP TABLE IF EXISTS `+table); err != nil {
-				return fmt.Errorf("migrate: drop %s: %w", table, err)
-			}
+	for _, table := range []string{"runs", "events", "breaker_state", "schedule_state", "meta"} {
+		if _, err := conn.ExecContext(ctx, `DROP TABLE IF EXISTS `+table); err != nil {
+			return fmt.Errorf("migrate: drop %s: %w", table, err)
 		}
 	}
 
@@ -425,12 +519,12 @@ func (s *Store) migrate(ctx context.Context) error {
 		);`,
 	}
 	for _, stmt := range stmts {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
+		if _, err := conn.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
 
-	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+	if _, err := conn.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
 		return fmt.Errorf("migrate: set schema version: %w", err)
 	}
 	return nil
