@@ -6,83 +6,16 @@ import (
 	"strings"
 )
 
+// Calendar is a launchd StartCalendarInterval entry. A nil field is a wildcard.
+// Schedule jobs no longer use this (the supervisor owns their timing); it
+// survives only for the supervisor agent's own every-minute tick, where an
+// all-nil Calendar renders as an empty dict.
 type Calendar struct {
 	Minute  *int
 	Hour    *int
 	Day     *int
 	Month   *int
 	Weekday *int
-}
-
-// ParseCron parses a 5-field cron expression and returns one or more Calendar
-// entries. Supports: *, N, N-M, */N, N-M/S, and comma-separated lists where
-// each element can be any of the above forms.
-//
-// Multiple values in a field produce multiple Calendar entries via cartesian
-// product across all fields.
-func ParseCron(cron string) ([]Calendar, error) {
-	parts := strings.Fields(strings.TrimSpace(cron))
-	if len(parts) != 5 {
-		return nil, fmt.Errorf("cron must have 5 fields")
-	}
-
-	type fieldDef struct {
-		name     string
-		min, max int
-	}
-	fields := []fieldDef{
-		{"minute", 0, 59},
-		{"hour", 0, 23},
-		{"day", 1, 31},
-		{"month", 1, 12},
-		{"weekday", 0, 6},
-	}
-
-	// Parse each field into a slice of values. nil means wildcard.
-	parsed := make([][]*int, 5)
-	for i, fd := range fields {
-		vals, err := parseField(parts[i], fd.min, fd.max)
-		if err != nil {
-			return nil, fmt.Errorf("%s: %w", fd.name, err)
-		}
-		parsed[i] = vals
-	}
-
-	// Build calendars via cartesian product of all field values.
-	calendars := []Calendar{{}}
-	for fieldIdx := 0; fieldIdx < 5; fieldIdx++ {
-		vals := parsed[fieldIdx]
-		var next []Calendar
-		for _, cal := range calendars {
-			for _, v := range vals {
-				c := cal
-				switch fieldIdx {
-				case 0:
-					c.Minute = v
-				case 1:
-					c.Hour = v
-				case 2:
-					c.Day = v
-				case 3:
-					c.Month = v
-				case 4:
-					c.Weekday = v
-				}
-				next = append(next, c)
-			}
-		}
-		calendars = next
-	}
-
-	// launchd StartCalendarInterval doesn't support ranges or steps natively,
-	// so we expand them into individual entries. Cap the total to prevent
-	// bloated plists that are hard to debug and may hit undocumented limits.
-	const maxEntries = 256
-	if len(calendars) > maxEntries {
-		return nil, fmt.Errorf("cron %q expands to %d calendar entries (max %d) - simplify the expression or split into multiple jobs", cron, len(calendars), maxEntries)
-	}
-
-	return calendars, nil
 }
 
 // parseField parses a single cron field and returns a slice of pointer-to-int

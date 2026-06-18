@@ -27,10 +27,10 @@ func (ExecRunner) Run(name string, args ...string) error {
 }
 
 type ApplyOptions struct {
-	HomeDir    string
-	RunnerPath string
-	Runner     CommandRunner
-	Namespace  string
+	HomeDir        string
+	RunnerPath     string
+	SupervisorPath string
+	Runner         CommandRunner
 }
 
 type Summary struct {
@@ -52,9 +52,8 @@ func Apply(f config.File, opts ApplyOptions) (Summary, error) {
 		return Summary{}, err
 	}
 
-	namespace := core.NormalizeNamespace(opts.Namespace)
 	launchDir := core.LaunchAgentsDir(uc.HomeDir)
-	logsRoot := core.LogsDir(uc.HomeDir, namespace)
+	logsRoot := core.LogsDir(uc.HomeDir)
 
 	if err := os.MkdirAll(launchDir, 0o755); err != nil {
 		return Summary{}, fmt.Errorf("create launch agents dir: %w", err)
@@ -80,15 +79,15 @@ func Apply(f config.File, opts ApplyOptions) (Summary, error) {
 	desired := map[string]string{}
 	desiredLabels := map[string]string{}
 	for _, job := range jobs {
-		label := core.BuildLabel(uc.Username, namespace, job.ID)
+		label := core.BuildLabel(uc.Username, job.ID)
 		plistPath := core.PlistPath(uc.HomeDir, label)
-		stdoutPath := core.LogFilePath(uc.HomeDir, namespace, job.ID, "stdout")
-		stderrPath := core.LogFilePath(uc.HomeDir, namespace, job.ID, "stderr")
+		stdoutPath := core.LogFilePath(uc.HomeDir, job.ID, "stdout")
+		stderrPath := core.LogFilePath(uc.HomeDir, job.ID, "stderr")
 		if err := os.MkdirAll(filepath.Dir(stdoutPath), 0o755); err != nil {
 			return Summary{}, fmt.Errorf("create logs for %s: %w", job.ID, err)
 		}
 
-		spec, err := BuildSpec(label, job, runnerPath, stdoutPath, stderrPath, namespace)
+		spec, err := BuildSpec(label, job, runnerPath, stdoutPath, stderrPath)
 		if err != nil {
 			return Summary{}, err
 		}
@@ -100,7 +99,30 @@ func Apply(f config.File, opts ApplyOptions) (Summary, error) {
 		desiredLabels[plistPath] = label
 	}
 
-	managedPattern := core.ManagedGlob(uc.HomeDir, uc.Username, namespace)
+	// The supervisor agent is always desired: it's the one job launchd keeps
+	// ticking, and the scheduler that drives every schedule job. Adding it to
+	// `desired` both bootstraps it and protects it from the global-glob GC below.
+	supervisorPath, err := resolveSupervisorPath(opts.SupervisorPath)
+	if err != nil {
+		return Summary{}, err
+	}
+	{
+		supLabel := core.SupervisorLabel(uc.Username)
+		supPlistPath := core.PlistPath(uc.HomeDir, supLabel)
+		supStdout := core.LogFilePath(uc.HomeDir, core.SupervisorName, "stdout")
+		supStderr := core.LogFilePath(uc.HomeDir, core.SupervisorName, "stderr")
+		if err := os.MkdirAll(filepath.Dir(supStdout), 0o755); err != nil {
+			return Summary{}, fmt.Errorf("create supervisor logs: %w", err)
+		}
+		supContent, err := RenderPlist(BuildSupervisorSpec(supLabel, supervisorPath, supStdout, supStderr))
+		if err != nil {
+			return Summary{}, err
+		}
+		desired[supPlistPath] = supContent
+		desiredLabels[supPlistPath] = supLabel
+	}
+
+	managedPattern := core.ManagedGlob(uc.HomeDir, uc.Username)
 	existing, err := filepath.Glob(managedPattern)
 	if err != nil {
 		return Summary{}, fmt.Errorf("glob managed plists: %w", err)
@@ -218,4 +240,34 @@ func resolveRunnerPath(path string) (string, error) {
 		return "", err
 	}
 	return abs, nil
+}
+
+// resolveSupervisorPath resolves the `beagle` binary the supervisor plist
+// invokes. An explicit override wins; otherwise prefer the binary running this
+// apply (os.Executable), falling back to PATH.
+func resolveSupervisorPath(path string) (string, error) {
+	if path != "" {
+		if !filepath.IsAbs(path) {
+			return "", fmt.Errorf("supervisor path must be absolute: %s", path)
+		}
+		if info, err := os.Stat(path); err != nil {
+			return "", fmt.Errorf("supervisor path invalid: %w", err)
+		} else if info.IsDir() {
+			return "", fmt.Errorf("supervisor path is a directory: %s", path)
+		}
+		return path, nil
+	}
+
+	if self, err := os.Executable(); err == nil {
+		if resolved, err := filepath.EvalSymlinks(self); err == nil {
+			return resolved, nil
+		}
+		return self, nil
+	}
+
+	found, err := exec.LookPath("beagle")
+	if err != nil {
+		return "", fmt.Errorf("beagle not found; set ApplyOptions.SupervisorPath to an absolute beagle binary")
+	}
+	return filepath.Abs(found)
 }

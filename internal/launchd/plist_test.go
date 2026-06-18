@@ -16,7 +16,7 @@ func TestBuildAndRenderServicePlist(t *testing.T) {
 		Enabled: true,
 	}
 
-	spec, err := BuildSpec("com.beagle.test.worker_a", rj, "beagle-run", "/tmp/stdout.log", "/tmp/stderr.log", "team-a")
+	spec, err := BuildSpec("com.beagle.test.worker_a", rj, "beagle-run", "/tmp/stdout.log", "/tmp/stderr.log")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -45,9 +45,12 @@ func TestBuildAndRenderSchedulePlist(t *testing.T) {
 		},
 	}
 
-	spec, err := BuildSpec("com.beagle.test.monthly_report", rj, "beagle-run", "/tmp/stdout.log", "/tmp/stderr.log", "team-a")
+	spec, err := BuildSpec("com.beagle.test.monthly_report", rj, "beagle-run", "/tmp/stdout.log", "/tmp/stderr.log")
 	if err != nil {
 		t.Fatal(err)
+	}
+	if len(spec.Calendars) != 0 {
+		t.Fatalf("schedule jobs are now trigger-less (supervisor drives them), got %d calendars", len(spec.Calendars))
 	}
 
 	plist, err := RenderPlist(spec)
@@ -55,11 +58,30 @@ func TestBuildAndRenderSchedulePlist(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !strings.Contains(plist, "<key>StartCalendarInterval</key>") {
-		t.Fatalf("expected StartCalendarInterval in plist: %s", plist)
+	// The supervisor owns timing now, so a schedule job's own plist must have no
+	// StartCalendarInterval - it sits loaded and is kicked on demand.
+	if strings.Contains(plist, "<key>StartCalendarInterval</key>") {
+		t.Fatalf("schedule job plist should be trigger-less: %s", plist)
 	}
-	if !strings.Contains(plist, "<key>Hour</key>") || !strings.Contains(plist, "<integer>5</integer>") {
-		t.Fatalf("expected hour value in schedule plist: %s", plist)
+}
+
+func TestBuildAndRenderSupervisorPlist(t *testing.T) {
+	spec := BuildSupervisorSpec("com.beagle.test.supervisor", "/usr/local/bin/beagle", "/tmp/out.log", "/tmp/err.log")
+	plist, err := RenderPlist(spec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(plist, "<key>RunAtLoad</key>") || !strings.Contains(plist, "<true/>") {
+		t.Fatalf("supervisor must RunAtLoad: %s", plist)
+	}
+	if !strings.Contains(plist, "<key>StartCalendarInterval</key>") {
+		t.Fatalf("supervisor must tick every minute via StartCalendarInterval: %s", plist)
+	}
+	if strings.Contains(plist, "<key>KeepAlive</key>") {
+		t.Fatalf("supervisor is a one-shot and must not KeepAlive: %s", plist)
+	}
+	if !strings.Contains(plist, "<string>supervise</string>") {
+		t.Fatalf("supervisor must invoke `beagle supervise`: %s", plist)
 	}
 }
 
@@ -133,40 +155,32 @@ func TestRenderPlistMultipleCalendarsUsesArray(t *testing.T) {
 	}
 }
 
-func TestRenderPlistScheduleViaBuiltSpec(t *testing.T) {
-	// End-to-end: cron expression with multiple values produces array rendering.
+func TestBuildSpecScheduleJobIsTriggerless(t *testing.T) {
 	rj := config.ResolvedJob{
-		ID:      "frequent",
-		Type:    "schedule",
-		Command: []string{"/usr/local/bin/ping"},
-		Enabled: true,
-		Schedule: config.Schedule{
-			Cron: "*/15 * * * *",
-		},
+		ID:       "frequent",
+		Type:     "schedule",
+		Command:  []string{"/usr/local/bin/ping"},
+		Enabled:  true,
+		Schedule: config.Schedule{Cron: "*/15 * * * *"},
 	}
 
-	spec, err := BuildSpec("com.beagle.test.frequent", rj, "beagle-run", "/tmp/out.log", "/tmp/err.log", "ns")
+	spec, err := BuildSpec("com.beagle.test.frequent", rj, "beagle-run", "/tmp/out.log", "/tmp/err.log")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(spec.Calendars) != 4 {
-		t.Fatalf("expected 4 calendars for */15, got %d", len(spec.Calendars))
+	if len(spec.Calendars) != 0 {
+		t.Fatalf("schedule jobs no longer expand to calendars, got %d", len(spec.Calendars))
+	}
+	// And no schedule env leaks now that the runner tz-gate is gone.
+	if _, ok := spec.Env["BEAGLE_SCHEDULE_CRON"]; ok {
+		t.Fatalf("BEAGLE_SCHEDULE_* env should be gone, got %v", spec.Env)
 	}
 
 	plist, err := RenderPlist(spec)
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	if !strings.Contains(plist, "<array>") {
-		t.Fatalf("*/15 should produce array rendering:\n%s", plist)
-	}
-
-	// Verify all 4 minute values appear.
-	for _, min := range []string{"0", "15", "30", "45"} {
-		expected := "<integer>" + min + "</integer>"
-		if !strings.Contains(plist, expected) {
-			t.Fatalf("missing minute %s in plist:\n%s", min, plist)
-		}
+	if strings.Contains(plist, "<key>StartCalendarInterval</key>") {
+		t.Fatalf("schedule job must be trigger-less:\n%s", plist)
 	}
 }

@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"os"
-	"strings"
 
 	"github.com/amterp/beagle/internal/runlog"
 	"github.com/amterp/beagle/internal/runner"
@@ -17,16 +16,6 @@ func main() {
 func run(args []string) int {
 	cmd := ra.NewCmd("beagle-run").SetDescription("Internal Beagle runner")
 	jobID, err := ra.NewString("job").SetUsage("Job id").Register(cmd)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	jobKey, err := ra.NewString("job-key").SetOptional(true).SetUsage("Namespaced job key").Register(cmd)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, err)
-		return 1
-	}
-	namespace, err := ra.NewString("namespace").SetOptional(true).SetUsage("Job namespace").Register(cmd)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		return 1
@@ -62,22 +51,13 @@ func run(args []string) int {
 	}
 	defer store.Close()
 
-	ns := strings.TrimSpace(*namespace)
-	if ns == "" {
-		ns = strings.TrimSpace(os.Getenv("BEAGLE_NAMESPACE"))
-	}
-	key := strings.TrimSpace(*jobKey)
-	if key == "" {
-		key = strings.TrimSpace(os.Getenv("BEAGLE_JOB_KEY"))
-	}
+	runner.RotateLogs(*jobID)
 
 	return runner.Run(runner.RunConfig{
-		JobID:     *jobID,
-		JobKey:    key,
-		Namespace: ns,
-		Command:   *command,
-		Stdin:     os.Stdin,
-		Stdout:    os.Stdout,
-		Stderr:    os.Stderr,
+		JobID:   *jobID,
+		Command: *command,
+		Stdin:   os.Stdin,
+		Stdout:  os.Stdout,
+		Stderr:  os.Stderr,
 	}, store, os.Stderr)
 }

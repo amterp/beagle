@@ -2,25 +2,33 @@ package core
 
 import "testing"
 
-func TestDataDir(t *testing.T) {
-	got := DataDir("/home/alice")
-	want := "/home/alice/.local/share/beagle"
+func TestBeagleDir(t *testing.T) {
+	got := BeagleDir("/home/alice")
+	want := "/home/alice/.beagle"
 	if got != want {
-		t.Fatalf("DataDir = %q, want %q", got, want)
+		t.Fatalf("BeagleDir = %q, want %q", got, want)
+	}
+}
+
+func TestConfigPath(t *testing.T) {
+	got := ConfigPath("/home/alice")
+	want := "/home/alice/.beagle/jobs.yaml"
+	if got != want {
+		t.Fatalf("ConfigPath = %q, want %q", got, want)
 	}
 }
 
 func TestLogsDir(t *testing.T) {
-	got := LogsDir("/home/alice", "team-a")
-	want := "/home/alice/.local/share/beagle/logs/team-a"
+	got := LogsDir("/home/alice")
+	want := "/home/alice/.beagle/logs"
 	if got != want {
 		t.Fatalf("LogsDir = %q, want %q", got, want)
 	}
 }
 
 func TestLogFilePath(t *testing.T) {
-	got := LogFilePath("/home/alice", "team-a", "worker", "stdout")
-	want := "/home/alice/.local/share/beagle/logs/team-a/worker/stdout.log"
+	got := LogFilePath("/home/alice", "worker", "stdout")
+	want := "/home/alice/.beagle/logs/worker/stdout.log"
 	if got != want {
 		t.Fatalf("LogFilePath = %q, want %q", got, want)
 	}
@@ -28,17 +36,9 @@ func TestLogFilePath(t *testing.T) {
 
 func TestRunlogDBPath(t *testing.T) {
 	got := RunlogDBPath("/home/alice")
-	want := "/home/alice/.local/share/beagle/beagle.db"
+	want := "/home/alice/.beagle/beagle.db"
 	if got != want {
 		t.Fatalf("RunlogDBPath = %q, want %q", got, want)
-	}
-}
-
-func TestProfileRegistryPath(t *testing.T) {
-	got := ProfileRegistryPath("/home/alice")
-	want := "/home/alice/.config/beagle/profiles.yaml"
-	if got != want {
-		t.Fatalf("ProfileRegistryPath = %q, want %q", got, want)
 	}
 }
 
@@ -51,8 +51,8 @@ func TestLaunchAgentsDir(t *testing.T) {
 }
 
 func TestPlistPath(t *testing.T) {
-	got := PlistPath("/home/alice", "com.beagle.alice.default.worker")
-	want := "/home/alice/Library/LaunchAgents/com.beagle.alice.default.worker.plist"
+	got := PlistPath("/home/alice", "com.beagle.alice.worker")
+	want := "/home/alice/Library/LaunchAgents/com.beagle.alice.worker.plist"
 	if got != want {
 		t.Fatalf("PlistPath = %q, want %q", got, want)
 	}

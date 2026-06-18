@@ -41,6 +41,43 @@ func TestValidateValidFile(t *testing.T) {
 	}
 }
 
+func TestParseCatchUp(t *testing.T) {
+	ok := map[string]string{"": "inherit/unset", "none": "strict", "6h": "window", "90m": "window", "168h": "max"}
+	for in := range ok {
+		if _, err := ParseCatchUp(in); err != nil {
+			t.Errorf("ParseCatchUp(%q) unexpected error: %v", in, err)
+		}
+	}
+	bad := []string{"1d", "garbage", "200h", "0h", "-3h"}
+	for _, in := range bad {
+		if _, err := ParseCatchUp(in); err == nil {
+			t.Errorf("ParseCatchUp(%q) expected error, got nil", in)
+		}
+	}
+}
+
+func TestResolveCatchUpJobOverridesDefault(t *testing.T) {
+	f := File{
+		Version:  CurrentVersion,
+		Defaults: Defaults{CatchUp: "6h"},
+		Jobs: Jobs{
+			"inherits": {Type: "service", Command: []string{"/bin/a"}},
+			"strict":   {Type: "service", Command: []string{"/bin/b"}, CatchUp: "none"},
+			"own":      {Type: "service", Command: []string{"/bin/c"}, CatchUp: "30m"},
+		},
+	}
+	jobs, err := Resolve(f)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{"inherits": "6h0m0s", "strict": "0s", "own": "30m0s"}
+	for _, j := range jobs {
+		if got := j.CatchUp.String(); got != want[j.ID] {
+			t.Errorf("job %s catch_up = %s, want %s", j.ID, got, want[j.ID])
+		}
+	}
+}
+
 func TestValidateRejectsInvalidConfig(t *testing.T) {
 	f := File{
 		Version: 2,

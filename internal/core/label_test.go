@@ -3,8 +3,8 @@ package core
 import "testing"
 
 func TestBuildLabel(t *testing.T) {
-	got := BuildLabel("alice", "team_a", "worker")
-	want := "com.beagle.alice.team_a.worker"
+	got := BuildLabel("alice", "worker")
+	want := "com.beagle.alice.worker"
 	if got != want {
 		t.Fatalf("BuildLabel = %q, want %q", got, want)
 	}
@@ -28,8 +28,8 @@ func TestSanitizeLabelPart(t *testing.T) {
 }
 
 func TestManagedGlob(t *testing.T) {
-	got := ManagedGlob("/home/alice", "alice", "team_a")
-	want := "/home/alice/Library/LaunchAgents/com.beagle.alice.team_a.*.plist"
+	got := ManagedGlob("/home/alice", "alice")
+	want := "/home/alice/Library/LaunchAgents/com.beagle.alice.*.plist"
 	if got != want {
 		t.Fatalf("ManagedGlob = %q, want %q", got, want)
 	}

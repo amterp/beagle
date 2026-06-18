@@ -7,6 +7,8 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/amterp/beagle/internal/core"
 )
 
 var (
@@ -41,11 +43,18 @@ func Validate(f File) error {
 		errs = append(errs, "defaults.throttle_seconds must be >= 0")
 	}
 
+	if _, err := ParseCatchUp(f.Defaults.CatchUp); err != nil {
+		errs = append(errs, "defaults."+err.Error())
+	}
+
 	validateBreaker("defaults.circuit_breaker", f.Defaults.CircuitBreaker, &errs)
 
 	for id, job := range f.Jobs {
 		if !jobIDPattern.MatchString(id) {
 			errs = append(errs, fmt.Sprintf("jobs.%s: invalid job id", id))
+		}
+		if id == core.SupervisorName {
+			errs = append(errs, fmt.Sprintf("jobs.%s: %q is reserved for beagle's scheduler", id, core.SupervisorName))
 		}
 
 		t := strings.ToLower(strings.TrimSpace(job.Type))
@@ -72,6 +81,10 @@ func Validate(f File) error {
 
 		if job.ThrottleSeconds < 0 {
 			errs = append(errs, fmt.Sprintf("jobs.%s.throttle_seconds must be >= 0", id))
+		}
+
+		if _, err := ParseCatchUp(job.CatchUp); err != nil {
+			errs = append(errs, fmt.Sprintf("jobs.%s.%v", id, err))
 		}
 
 		validateBreaker("jobs."+id+".circuit_breaker", job.CircuitBreaker, &errs)
@@ -101,6 +114,32 @@ func Validate(f File) error {
 
 	sort.Strings(errs)
 	return fmt.Errorf("config validation failed:\n- %s", strings.Join(errs, "\n- "))
+}
+
+// maxCatchUp bounds how late a missed schedule job may run. It also caps how
+// far back the supervisor scans for a missed occurrence.
+const maxCatchUp = 168 * time.Hour // 7 days
+
+// ParseCatchUp interprets a catch_up value. Empty means "inherit"; "none"
+// (and 0) mean strict - only fire at the scheduled minute. Otherwise it must be
+// a positive Go duration (e.g. 6h, 90m) no larger than maxCatchUp. Note that Go
+// durations do not accept a "d" (days) unit, so 7 days is written as 168h.
+func ParseCatchUp(s string) (time.Duration, error) {
+	s = strings.TrimSpace(strings.ToLower(s))
+	if s == "" || s == "none" {
+		return 0, nil
+	}
+	d, err := time.ParseDuration(s)
+	if err != nil {
+		return 0, fmt.Errorf("invalid catch_up %q (use none or a duration like 6h or 90m; days like 1d are not supported - use 24h)", s)
+	}
+	if d <= 0 {
+		return 0, fmt.Errorf("catch_up %q must be positive or none", s)
+	}
+	if d > maxCatchUp {
+		return 0, fmt.Errorf("catch_up %s exceeds the maximum of %s", d, maxCatchUp)
+	}
+	return d, nil
 }
 
 func validateBreaker(prefix string, b CircuitBreaker, errs *[]string) {

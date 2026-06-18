@@ -50,6 +50,16 @@ func Resolve(f File) ([]ResolvedJob, error) {
 			throttleSeconds = f.Defaults.ThrottleSeconds
 		}
 
+		// "" inherits the default; "none" is an explicit strict override.
+		catchUpRaw := job.CatchUp
+		if catchUpRaw == "" {
+			catchUpRaw = f.Defaults.CatchUp
+		}
+		catchUp, err := ParseCatchUp(catchUpRaw)
+		if err != nil {
+			return nil, fmt.Errorf("jobs.%s.%w", id, err)
+		}
+
 		breaker := job.CircuitBreaker
 		if breaker.MaxFailures == 0 {
 			breaker.MaxFailures = f.Defaults.CircuitBreaker.MaxFailures
@@ -91,6 +101,7 @@ func Resolve(f File) ([]ResolvedJob, error) {
 				Timezone: tz,
 			},
 			Throttle:       time.Duration(throttleSeconds) * time.Second,
+			CatchUp:        catchUp,
 			CircuitBreaker: breaker,
 		}
 

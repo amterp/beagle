@@ -7,7 +7,6 @@ import (
 	"strings"
 
 	"github.com/amterp/beagle/internal/config"
-	"github.com/amterp/beagle/internal/core"
 )
 
 type JobSpec struct {
@@ -22,14 +21,14 @@ type JobSpec struct {
 	Restart     string
 	ThrottleSec int
 	Calendars   []Calendar
+	RunAtLoad   bool
 	Timezone    string
 }
 
-func BuildSpec(label string, rj config.ResolvedJob, runnerPath string, stdoutPath string, stderrPath string, namespace string) (JobSpec, error) {
-	jobKey := core.BuildJobKey(namespace, rj.ID)
+func BuildSpec(label string, rj config.ResolvedJob, runnerPath string, stdoutPath string, stderrPath string) (JobSpec, error) {
 	spec := JobSpec{
 		Label:       label,
-		ProgramArgs: append([]string{runnerPath, "--job", rj.ID, "--job-key", jobKey, "--namespace", namespace, "--"}, rj.Command...),
+		ProgramArgs: append([]string{runnerPath, "--job", rj.ID, "--"}, rj.Command...),
 		WorkingDir:  rj.WorkingDir,
 		Env:         map[string]string{},
 		StdoutPath:  stdoutPath,
@@ -44,27 +43,33 @@ func BuildSpec(label string, rj config.ResolvedJob, runnerPath string, stdoutPat
 		spec.Env[k] = v
 	}
 	spec.Env["BEAGLE_JOB_ID"] = rj.ID
-	spec.Env["BEAGLE_NAMESPACE"] = namespace
-	spec.Env["BEAGLE_JOB_KEY"] = jobKey
 	spec.Env["BEAGLE_JOB_TYPE"] = rj.Type
 	spec.Env["BEAGLE_BREAKER_MAX_FAILURES"] = fmt.Sprintf("%d", rj.CircuitBreaker.MaxFailures)
 	spec.Env["BEAGLE_BREAKER_WINDOW_SECONDS"] = fmt.Sprintf("%d", rj.CircuitBreaker.WindowSeconds)
 	spec.Env["BEAGLE_BREAKER_COOLDOWN_SECONDS"] = fmt.Sprintf("%d", rj.CircuitBreaker.CooldownSeconds)
-	if rj.Type == "schedule" {
-		spec.Env["BEAGLE_SCHEDULE_CRON"] = rj.Schedule.Cron
-		spec.Env["BEAGLE_SCHEDULE_TIMEZONE"] = rj.Schedule.Timezone
-		spec.Env["BEAGLE_SCHEDULE_STRICT_TZ"] = "1"
-	}
 
-	if rj.Type == "schedule" {
-		cals, err := ParseCron(rj.Schedule.Cron)
-		if err != nil {
-			return JobSpec{}, fmt.Errorf("parse cron for %s: %w", rj.ID, err)
-		}
-		spec.Calendars = cals
-	}
+	// Schedule jobs carry no StartCalendarInterval: the beagle supervisor owns
+	// their timing and triggers them via launchctl kickstart. They sit loaded as
+	// on-demand agents. Service jobs keep launchd's KeepAlive (see RenderPlist).
 
 	return spec, nil
+}
+
+// BuildSupervisorSpec builds the lone launchd agent that drives scheduling. It
+// runs `beagle supervise` on load (boot/login), on wake, and every minute -
+// the every-minute StartCalendarInterval is what reliably fires it after sleep,
+// which StartInterval does not. It is a one-shot (no KeepAlive), so launchd
+// re-runs it each minute without tripping the 10s respawn throttle.
+func BuildSupervisorSpec(label, beaglePath, stdoutPath, stderrPath string) JobSpec {
+	return JobSpec{
+		Label:       label,
+		ProgramArgs: []string{beaglePath, "supervise"},
+		StdoutPath:  stdoutPath,
+		StderrPath:  stderrPath,
+		Enabled:     true,
+		RunAtLoad:   true,
+		Calendars:   []Calendar{{}}, // empty dict = every minute
+	}
 }
 
 func RenderPlist(spec JobSpec) (string, error) {
@@ -126,7 +131,11 @@ func RenderPlist(spec JobSpec) (string, error) {
 		}
 	}
 
-	if spec.Type == "schedule" && len(spec.Calendars) > 0 {
+	if spec.RunAtLoad {
+		writeKeyTrue(&b, "RunAtLoad")
+	}
+
+	if len(spec.Calendars) > 0 {
 		b.WriteString("  <key>StartCalendarInterval</key>\n")
 		if len(spec.Calendars) == 1 {
 			renderCalendarDict(&b, spec.Calendars[0], "  ")

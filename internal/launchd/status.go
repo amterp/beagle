@@ -14,9 +14,8 @@ import (
 type OutputRunner func(name string, args ...string) (string, error)
 
 type StatusOptions struct {
-	HomeDir   string
-	RunOut    OutputRunner
-	Namespace string
+	HomeDir string
+	RunOut  OutputRunner
 }
 
 type JobStatus struct {
@@ -31,10 +30,12 @@ type JobStatus struct {
 }
 
 type DoctorReport struct {
-	HomeDirOK      bool
-	LaunchAgentsOK bool
-	LaunchctlOK    bool
-	Issues         []string
+	HomeDirOK        bool
+	LaunchAgentsOK   bool
+	LaunchctlOK      bool
+	RunnerOK         bool
+	SupervisorLoaded bool
+	Issues           []string
 }
 
 func List(f config.File, opts StatusOptions) ([]JobStatus, error) {
@@ -48,10 +49,9 @@ func List(f config.File, opts StatusOptions) ([]JobStatus, error) {
 		return nil, err
 	}
 
-	namespace := core.NormalizeNamespace(opts.Namespace)
 	items := make([]JobStatus, 0, len(resolved))
 	for _, j := range resolved {
-		label := core.BuildLabel(uc.Username, namespace, j.ID)
+		label := core.BuildLabel(uc.Username, j.ID)
 		plist := core.PlistPath(uc.HomeDir, label)
 		raw, loaded, disabled := inspectLabel(outRunner, uc.UID, label)
 		items = append(items, JobStatus{
@@ -114,6 +114,24 @@ func Doctor(opts StatusOptions) (DoctorReport, error) {
 		report.LaunchctlOK = true
 	} else {
 		report.Issues = append(report.Issues, "scheduler backend command is unavailable")
+	}
+
+	// The plist hard-codes an absolute path to beagle-run; if it can't be
+	// resolved, every job fails the moment launchd invokes it.
+	if _, err := resolveRunnerPath(strings.TrimSpace(os.Getenv("BEAGLE_RUNNER_PATH"))); err == nil {
+		report.RunnerOK = true
+	} else {
+		report.Issues = append(report.Issues, "beagle-run not found (set BEAGLE_RUNNER_PATH or `go install ./cmd/beagle-run`)")
+	}
+
+	// The supervisor is the single agent that drives every schedule job; if it
+	// isn't loaded, nothing scheduled will ever fire.
+	if uc, err := core.CurrentUserWithHome(home); err == nil {
+		if _, loaded, _ := inspectLabel(runner, uc.UID, core.SupervisorLabel(uc.Username)); loaded {
+			report.SupervisorLoaded = true
+		} else {
+			report.Issues = append(report.Issues, "scheduler supervisor is not loaded - run `beagle apply`")
+		}
 	}
 
 	return report, nil

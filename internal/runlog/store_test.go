@@ -2,7 +2,6 @@ package runlog
 
 import (
 	"context"
-	"database/sql"
 	"path/filepath"
 	"testing"
 	"time"
@@ -18,12 +17,10 @@ func TestStoreStartFinishAndFailures(t *testing.T) {
 
 	started := time.Now().Add(-2 * time.Second).UTC()
 	runID, err := store.StartRun(context.Background(), RunStart{
-		JobID:     "worker_a",
-		JobKey:    "team-a:worker_a",
-		Namespace: "team-a",
-		Command:   "/bin/echo hello",
-		PID:       123,
-		Started:   started,
+		JobID:   "worker_a",
+		Command: "/bin/echo hello",
+		PID:     123,
+		Started: started,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -41,7 +38,7 @@ func TestStoreStartFinishAndFailures(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	fails, err := store.RecentFailures(context.Background(), "team-a", "worker_a", 10)
+	fails, err := store.RecentFailures(context.Background(), "worker_a", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +77,6 @@ func TestFinishRunRecordsFailureEvent(t *testing.T) {
 
 	runID, err := store.StartRun(context.Background(), RunStart{
 		JobID:   "worker_a",
-		JobKey:  "ns:worker_a",
 		Command: "/bin/false",
 		PID:     1,
 		Started: time.Now().UTC(),
@@ -110,26 +106,35 @@ func TestFinishRunRecordsFailureEvent(t *testing.T) {
 	}
 }
 
-func TestEnsureColumnQuotesIdentifiers(t *testing.T) {
+// TestForeignSchemaWiped verifies that opening a database created by an older,
+// incompatible schema (here: a runs table with the dropped namespace column,
+// no user_version) recreates it cleanly rather than erroring.
+func TestForeignSchemaWiped(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "beagle.db")
-	store, err := Open(dbPath)
+
+	pre, err := Open(dbPath) // borrow Open just to get a connection, then clobber
 	if err != nil {
 		t.Fatal(err)
+	}
+	if _, err := pre.db.Exec(`DROP TABLE runs`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pre.db.Exec(`CREATE TABLE runs (id INTEGER PRIMARY KEY, job_id TEXT, namespace TEXT, started_at TEXT, status TEXT)`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pre.db.Exec(`PRAGMA user_version = 0`); err != nil {
+		t.Fatal(err)
+	}
+	pre.Close()
+
+	store, err := Open(dbPath)
+	if err != nil {
+		t.Fatalf("reopening a foreign-schema DB should recreate it, got: %v", err)
 	}
 	defer store.Close()
 
-	// Verify the ensureColumn function works correctly with double-quoted
-	// identifiers by adding a test column to the runs table.
-	err = store.ensureColumn(context.Background(), "runs", "test_col", "TEXT DEFAULT 'ok'")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	// Verify the column exists
-	var val sql.NullString
-	err = store.db.QueryRow(`SELECT test_col FROM runs LIMIT 1`).Scan(&val)
-	if err != nil && err != sql.ErrNoRows {
-		t.Fatalf("column should exist: %v", err)
+	if _, err := store.StartRun(context.Background(), RunStart{JobID: "j", Command: "c", PID: 1, Started: time.Now().UTC()}); err != nil {
+		t.Fatalf("StartRun on recreated schema failed: %v", err)
 	}
 }
 
@@ -148,10 +153,10 @@ func TestBreakerStateOpensAfterFailureThreshold(t *testing.T) {
 		CooldownSeconds: 120,
 	}
 
-	if err := store.RecordOutcome(context.Background(), "team-a:worker_a", now, true, policy); err != nil {
+	if err := store.RecordOutcome(context.Background(), "worker_a", now, true, policy); err != nil {
 		t.Fatal(err)
 	}
-	open, _, err := store.IsBreakerOpen(context.Background(), "team-a:worker_a", now.Add(time.Second))
+	open, _, err := store.IsBreakerOpen(context.Background(), "worker_a", now.Add(time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -159,10 +164,10 @@ func TestBreakerStateOpensAfterFailureThreshold(t *testing.T) {
 		t.Fatal("breaker should not be open after first failure")
 	}
 
-	if err := store.RecordOutcome(context.Background(), "team-a:worker_a", now.Add(2*time.Second), true, policy); err != nil {
+	if err := store.RecordOutcome(context.Background(), "worker_a", now.Add(2*time.Second), true, policy); err != nil {
 		t.Fatal(err)
 	}
-	open, until, err := store.IsBreakerOpen(context.Background(), "team-a:worker_a", now.Add(3*time.Second))
+	open, until, err := store.IsBreakerOpen(context.Background(), "worker_a", now.Add(3*time.Second))
 	if err != nil {
 		t.Fatal(err)
 	}

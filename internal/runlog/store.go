@@ -12,17 +12,20 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// schemaVersion identifies the current DB layout. A database whose
+// user_version differs is treated as foreign (e.g. the pre-refactor
+// namespaced schema) and wiped - beagle keeps no data worth migrating.
+const schemaVersion = 1
+
 type Store struct {
 	db *sql.DB
 }
 
 type RunStart struct {
-	JobID     string
-	JobKey    string
-	Namespace string
-	Command   string
-	PID       int
-	Started   time.Time
+	JobID   string
+	Command string
+	PID     int
+	Started time.Time
 }
 
 type RunFinish struct {
@@ -37,8 +40,6 @@ type RunFinish struct {
 
 type Failure struct {
 	JobID      string
-	JobKey     string
-	Namespace  string
 	StartedAt  time.Time
 	FinishedAt time.Time
 	ExitCode   int
@@ -90,14 +91,10 @@ func (s *Store) Close() error {
 }
 
 func (s *Store) StartRun(ctx context.Context, r RunStart) (int64, error) {
-	jobKey := r.JobKey
-	if jobKey == "" {
-		jobKey = r.JobID
-	}
 	res, err := s.db.ExecContext(ctx, `
-INSERT INTO runs(job_id, job_key, namespace, started_at, finished_at, duration_ms, pid, exit_code, term_signal, status, failure_class, notes, command)
-VALUES (?, ?, ?, ?, NULL, NULL, ?, NULL, NULL, 'running', NULL, NULL, ?)
-`, r.JobID, jobKey, r.Namespace, r.Started.UTC().Format(time.RFC3339Nano), r.PID, r.Command)
+INSERT INTO runs(job_id, started_at, finished_at, duration_ms, pid, exit_code, term_signal, status, failure_class, notes, command)
+VALUES (?, ?, NULL, NULL, ?, NULL, NULL, 'running', NULL, NULL, ?)
+`, r.JobID, r.Started.UTC().Format(time.RFC3339Nano), r.PID, r.Command)
 	if err != nil {
 		return 0, fmt.Errorf("insert run: %w", err)
 	}
@@ -136,8 +133,8 @@ WHERE id = ?
 
 	if f.Status == "failed" {
 		if _, err := s.db.ExecContext(ctx, `
-INSERT INTO events(ts, job_id, job_key, namespace, level, event_type, message)
-SELECT ?, job_id, job_key, namespace, 'error', 'run_failed', ? FROM runs WHERE id = ?
+INSERT INTO events(ts, job_id, level, event_type, message)
+SELECT ?, job_id, 'error', 'run_failed', ? FROM runs WHERE id = ?
 `, f.Finished.UTC().Format(time.RFC3339Nano), fmt.Sprintf("run failed: exit=%d signal=%s", f.ExitCode, f.TermSignal), f.ID); err != nil {
 			return fmt.Errorf("record failure event: %w", err)
 		}
@@ -146,20 +143,67 @@ SELECT ?, job_id, job_key, namespace, 'error', 'run_failed', ? FROM runs WHERE i
 	return nil
 }
 
-func (s *Store) RecentFailures(ctx context.Context, namespace string, jobID string, limit int) ([]Failure, error) {
+// LastRun returns the most recent run's start time for a job, if any.
+func (s *Store) LastRun(ctx context.Context, jobID string) (time.Time, bool, error) {
+	var startedRaw string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT started_at FROM runs WHERE job_id = ? ORDER BY started_at DESC LIMIT 1`, jobID).Scan(&startedRaw)
+	if err == sql.ErrNoRows {
+		return time.Time{}, false, nil
+	}
+	if err != nil {
+		return time.Time{}, false, err
+	}
+	t, err := time.Parse(time.RFC3339Nano, startedRaw)
+	if err != nil {
+		return time.Time{}, false, nil
+	}
+	return t, true, nil
+}
+
+// RunSummary is the most recent run outcome for a job.
+type RunSummary struct {
+	JobID     string
+	StartedAt time.Time
+	Status    string
+	ExitCode  int
+}
+
+// LastRunSummaries returns the latest run per job, newest run id wins.
+func (s *Store) LastRunSummaries(ctx context.Context) ([]RunSummary, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT job_id, started_at, status, IFNULL(exit_code, 0)
+FROM runs
+WHERE id IN (SELECT MAX(id) FROM runs GROUP BY job_id)
+ORDER BY job_id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := []RunSummary{}
+	for rows.Next() {
+		var rs RunSummary
+		var startedRaw string
+		if err := rows.Scan(&rs.JobID, &startedRaw, &rs.Status, &rs.ExitCode); err != nil {
+			return nil, err
+		}
+		rs.StartedAt, _ = time.Parse(time.RFC3339Nano, startedRaw)
+		out = append(out, rs)
+	}
+	return out, rows.Err()
+}
+
+func (s *Store) RecentFailures(ctx context.Context, jobID string, limit int) ([]Failure, error) {
 	if limit <= 0 {
 		limit = 20
 	}
 
 	base := `
-SELECT job_id, IFNULL(job_key, job_id), IFNULL(namespace, ''), started_at, IFNULL(finished_at, started_at), IFNULL(exit_code, -1), status, IFNULL(failure_class, ''), IFNULL(notes, '')
+SELECT job_id, started_at, IFNULL(finished_at, started_at), IFNULL(exit_code, -1), status, IFNULL(failure_class, ''), IFNULL(notes, '')
 FROM runs
 WHERE status = 'failed'`
 	args := []any{}
-	if namespace != "" {
-		base += ` AND namespace = ?`
-		args = append(args, namespace)
-	}
 	if jobID != "" {
 		base += ` AND job_id = ?`
 		args = append(args, jobID)
@@ -177,7 +221,7 @@ WHERE status = 'failed'`
 	for rows.Next() {
 		var f Failure
 		var startedRaw, finishedRaw string
-		if err := rows.Scan(&f.JobID, &f.JobKey, &f.Namespace, &startedRaw, &finishedRaw, &f.ExitCode, &f.Status, &f.FailureCls, &f.Notes); err != nil {
+		if err := rows.Scan(&f.JobID, &startedRaw, &finishedRaw, &f.ExitCode, &f.Status, &f.FailureCls, &f.Notes); err != nil {
 			return nil, err
 		}
 		f.StartedAt, _ = time.Parse(time.RFC3339Nano, startedRaw)
@@ -187,9 +231,9 @@ WHERE status = 'failed'`
 	return out, rows.Err()
 }
 
-func (s *Store) IsBreakerOpen(ctx context.Context, jobKey string, now time.Time) (bool, time.Time, error) {
+func (s *Store) IsBreakerOpen(ctx context.Context, jobID string, now time.Time) (bool, time.Time, error) {
 	var openUntilRaw string
-	err := s.db.QueryRowContext(ctx, `SELECT open_until FROM breaker_state WHERE job_key = ?`, jobKey).Scan(&openUntilRaw)
+	err := s.db.QueryRowContext(ctx, `SELECT open_until FROM breaker_state WHERE job_id = ?`, jobID).Scan(&openUntilRaw)
 	if err == sql.ErrNoRows {
 		return false, time.Time{}, nil
 	}
@@ -203,7 +247,7 @@ func (s *Store) IsBreakerOpen(ctx context.Context, jobKey string, now time.Time)
 	return now.Before(openUntil), openUntil, nil
 }
 
-func (s *Store) RecordOutcome(ctx context.Context, jobKey string, now time.Time, failed bool, policy BreakerPolicy) error {
+func (s *Store) RecordOutcome(ctx context.Context, jobID string, now time.Time, failed bool, policy BreakerPolicy) error {
 	if policy.MaxFailures <= 0 || policy.WindowSeconds <= 0 || policy.CooldownSeconds <= 0 {
 		return nil
 	}
@@ -224,7 +268,7 @@ func (s *Store) RecordOutcome(ctx context.Context, jobKey string, now time.Time,
 		openUntil  string
 	}
 	var st state
-	row := tx.QueryRowContext(ctx, `SELECT failure_count, window_started_at, open_until FROM breaker_state WHERE job_key = ?`, jobKey)
+	row := tx.QueryRowContext(ctx, `SELECT failure_count, window_started_at, open_until FROM breaker_state WHERE job_id = ?`, jobID)
 	scanErr := row.Scan(&st.count, &st.windowFrom, &st.openUntil)
 	if scanErr == sql.ErrNoRows {
 		st = state{count: 0, windowFrom: now.UTC().Format(time.RFC3339Nano)}
@@ -253,29 +297,94 @@ func (s *Store) RecordOutcome(ctx context.Context, jobKey string, now time.Time,
 		openUntil = now.Add(time.Duration(policy.CooldownSeconds) * time.Second)
 	}
 
-	ns, jobID := core.SplitJobKey(jobKey)
 	_, err = tx.ExecContext(ctx, `
-INSERT INTO breaker_state(job_key, job_id, namespace, failure_count, window_started_at, open_until, updated_at)
-VALUES (?, ?, ?, ?, ?, ?, ?)
-ON CONFLICT(job_key) DO UPDATE SET
+INSERT INTO breaker_state(job_id, failure_count, window_started_at, open_until, updated_at)
+VALUES (?, ?, ?, ?, ?)
+ON CONFLICT(job_id) DO UPDATE SET
 	failure_count = excluded.failure_count,
 	window_started_at = excluded.window_started_at,
 	open_until = excluded.open_until,
 	updated_at = excluded.updated_at
-`, jobKey, jobID, ns, st.count, windowFrom.UTC().Format(time.RFC3339Nano), openUntil.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano))
+`, jobID, st.count, windowFrom.UTC().Format(time.RFC3339Nano), openUntil.UTC().Format(time.RFC3339Nano), now.UTC().Format(time.RFC3339Nano))
 	if err != nil {
 		return err
 	}
 	return tx.Commit()
 }
 
+// GetScheduleFire returns the last-handled occurrence key for a schedule job.
+// The key is an opaque string owned by the caller (the supervisor stores a
+// wall-clock occurrence identity so DST fall-back fires exactly once).
+func (s *Store) GetScheduleFire(ctx context.Context, jobID string) (string, bool, error) {
+	var key string
+	err := s.db.QueryRowContext(ctx, `SELECT last_fire FROM schedule_state WHERE job_id = ?`, jobID).Scan(&key)
+	if err == sql.ErrNoRows {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	return key, true, nil
+}
+
+// RecordScheduleFire records that an occurrence was handled. The supervisor
+// calls this only after a successful kick, so a failed kick leaves the prior
+// state and the next tick retries.
+func (s *Store) RecordScheduleFire(ctx context.Context, jobID, occurrence string, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO schedule_state(job_id, last_fire, updated_at)
+VALUES (?, ?, ?)
+ON CONFLICT(job_id) DO UPDATE SET last_fire = excluded.last_fire, updated_at = excluded.updated_at
+`, jobID, occurrence, now.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+// SetMeta upserts a key/value with a timestamp. The supervisor heartbeat uses
+// this so doctor can tell whether the scheduler is actually ticking.
+func (s *Store) SetMeta(ctx context.Context, key, value string, now time.Time) error {
+	_, err := s.db.ExecContext(ctx, `
+INSERT INTO meta(key, value, updated_at)
+VALUES (?, ?, ?)
+ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at
+`, key, value, now.UTC().Format(time.RFC3339Nano))
+	return err
+}
+
+// GetMeta returns a meta value and when it was last written.
+func (s *Store) GetMeta(ctx context.Context, key string) (value string, updatedAt time.Time, ok bool, err error) {
+	var valRaw, tsRaw string
+	scanErr := s.db.QueryRowContext(ctx, `SELECT value, updated_at FROM meta WHERE key = ?`, key).Scan(&valRaw, &tsRaw)
+	if scanErr == sql.ErrNoRows {
+		return "", time.Time{}, false, nil
+	}
+	if scanErr != nil {
+		return "", time.Time{}, false, scanErr
+	}
+	ts, _ := time.Parse(time.RFC3339Nano, tsRaw)
+	return valRaw, ts, true, nil
+}
+
 func (s *Store) migrate(ctx context.Context) error {
+	var userVersion int
+	if err := s.db.QueryRowContext(ctx, `PRAGMA user_version`).Scan(&userVersion); err != nil {
+		return fmt.Errorf("migrate: read schema version: %w", err)
+	}
+
+	// A foreign schema (most importantly the pre-refactor namespaced layout)
+	// is wiped rather than migrated. Dropping then creating sidesteps the
+	// column-vs-index ordering hazards that bricked the old migrate path.
+	if userVersion != schemaVersion {
+		for _, table := range []string{"runs", "events", "breaker_state", "schedule_state"} {
+			if _, err := s.db.ExecContext(ctx, `DROP TABLE IF EXISTS `+table); err != nil {
+				return fmt.Errorf("migrate: drop %s: %w", table, err)
+			}
+		}
+	}
+
 	stmts := []string{
 		`CREATE TABLE IF NOT EXISTS runs (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			job_id TEXT NOT NULL,
-			job_key TEXT NOT NULL DEFAULT '',
-			namespace TEXT NOT NULL DEFAULT '',
 			started_at TEXT NOT NULL,
 			finished_at TEXT,
 			duration_ms INTEGER,
@@ -291,143 +400,38 @@ func (s *Store) migrate(ctx context.Context) error {
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
 			ts TEXT NOT NULL,
 			job_id TEXT NOT NULL,
-			job_key TEXT NOT NULL DEFAULT '',
-			namespace TEXT NOT NULL DEFAULT '',
 			level TEXT NOT NULL,
 			event_type TEXT NOT NULL,
 			message TEXT NOT NULL
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_runs_job_started ON runs(job_id, started_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_runs_job_key_started ON runs(job_key, started_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_runs_namespace_started ON runs(namespace, started_at DESC);`,
-		`CREATE INDEX IF NOT EXISTS idx_runs_status_started ON runs(status, started_at DESC);`,
 		`CREATE TABLE IF NOT EXISTS breaker_state (
-			job_key TEXT PRIMARY KEY,
-			job_id TEXT NOT NULL DEFAULT '',
-			namespace TEXT NOT NULL DEFAULT '',
+			job_id TEXT PRIMARY KEY,
 			failure_count INTEGER NOT NULL,
 			window_started_at TEXT NOT NULL,
 			open_until TEXT NOT NULL,
 			updated_at TEXT NOT NULL
 		);`,
-		`CREATE INDEX IF NOT EXISTS idx_breaker_namespace_job ON breaker_state(namespace, job_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_runs_job_started ON runs(job_id, started_at DESC);`,
+		`CREATE INDEX IF NOT EXISTS idx_runs_status_started ON runs(status, started_at DESC);`,
+		`CREATE TABLE IF NOT EXISTS schedule_state (
+			job_id TEXT PRIMARY KEY,
+			last_fire TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
+		`CREATE TABLE IF NOT EXISTS meta (
+			key TEXT PRIMARY KEY,
+			value TEXT NOT NULL,
+			updated_at TEXT NOT NULL
+		);`,
 	}
-
 	for _, stmt := range stmts {
 		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
 			return fmt.Errorf("migrate: %w", err)
 		}
 	}
 
-	// SAFETY: table/column names below are always hardcoded string literals,
-	// never user input. Double-quoted identifiers are defense-in-depth.
-	if err := s.ensureColumn(ctx, "runs", "job_key", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn(ctx, "runs", "namespace", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if _, err := s.db.ExecContext(ctx, `UPDATE runs SET job_key = job_id WHERE job_key = ''`); err != nil {
-		return fmt.Errorf("migrate: %w", err)
-	}
-	if err := s.ensureColumn(ctx, "events", "job_key", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := s.ensureColumn(ctx, "events", "namespace", "TEXT NOT NULL DEFAULT ''"); err != nil {
-		return err
-	}
-	if err := s.migrateBreakerState(ctx); err != nil {
-		return err
-	}
-	return nil
-}
-
-// ensureColumn adds a column to a table if it doesn't already exist.
-// SAFETY: table and col must be hardcoded constants, never user input.
-// Identifiers are double-quoted for defense-in-depth.
-func (s *Store) ensureColumn(ctx context.Context, table string, col string, def string) error {
-	rows, err := s.db.QueryContext(ctx, fmt.Sprintf(`PRAGMA table_info("%s")`, table))
-	if err != nil {
-		return fmt.Errorf("migrate: %w", err)
-	}
-	defer rows.Close()
-
-	var (
-		cid       int
-		name      string
-		colType   string
-		notNull   int
-		dfltValue sql.NullString
-		pk        int
-	)
-	for rows.Next() {
-		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
-			return fmt.Errorf("migrate: %w", err)
-		}
-		if name == col {
-			return nil
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("migrate: %w", err)
-	}
-	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`ALTER TABLE "%s" ADD COLUMN "%s" %s`, table, col, def)); err != nil {
-		return fmt.Errorf("migrate: %w", err)
-	}
-	return nil
-}
-
-func (s *Store) migrateBreakerState(ctx context.Context) error {
-	rows, err := s.db.QueryContext(ctx, `PRAGMA table_info(breaker_state)`)
-	if err != nil {
-		return fmt.Errorf("migrate: %w", err)
-	}
-	defer rows.Close()
-
-	hasJobKey := false
-	var (
-		cid       int
-		name      string
-		colType   string
-		notNull   int
-		dfltValue sql.NullString
-		pk        int
-	)
-	for rows.Next() {
-		if err := rows.Scan(&cid, &name, &colType, &notNull, &dfltValue, &pk); err != nil {
-			return fmt.Errorf("migrate: %w", err)
-		}
-		if name == "job_key" {
-			hasJobKey = true
-		}
-	}
-	if err := rows.Err(); err != nil {
-		return fmt.Errorf("migrate: %w", err)
-	}
-	if hasJobKey {
-		return nil
-	}
-
-	stmts := []string{
-		`CREATE TABLE breaker_state_v2 (
-			job_key TEXT PRIMARY KEY,
-			job_id TEXT NOT NULL,
-			namespace TEXT NOT NULL,
-			failure_count INTEGER NOT NULL,
-			window_started_at TEXT NOT NULL,
-			open_until TEXT NOT NULL,
-			updated_at TEXT NOT NULL
-		);`,
-		`INSERT INTO breaker_state_v2(job_key, job_id, namespace, failure_count, window_started_at, open_until, updated_at)
-		 SELECT job_id, job_id, '', failure_count, window_started_at, open_until, updated_at FROM breaker_state;`,
-		`DROP TABLE breaker_state;`,
-		`ALTER TABLE breaker_state_v2 RENAME TO breaker_state;`,
-		`CREATE INDEX IF NOT EXISTS idx_breaker_namespace_job ON breaker_state(namespace, job_id);`,
-	}
-	for _, stmt := range stmts {
-		if _, err := s.db.ExecContext(ctx, stmt); err != nil {
-			return fmt.Errorf("migrate: %w", err)
-		}
+	if _, err := s.db.ExecContext(ctx, fmt.Sprintf(`PRAGMA user_version = %d`, schemaVersion)); err != nil {
+		return fmt.Errorf("migrate: set schema version: %w", err)
 	}
 	return nil
 }

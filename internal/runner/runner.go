@@ -10,19 +10,16 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/amterp/beagle/internal/core"
 	"github.com/amterp/beagle/internal/runlog"
 )
 
 // RunConfig holds the parameters for a beagle-run execution.
 type RunConfig struct {
-	JobID     string
-	JobKey    string
-	Namespace string
-	Command   []string
-	Stdin     io.Reader
-	Stdout    io.Writer
-	Stderr    io.Writer
+	JobID   string
+	Command []string
+	Stdin   io.Reader
+	Stdout  io.Writer
+	Stderr  io.Writer
 }
 
 // Run executes the job command, recording telemetry to the store.
@@ -30,19 +27,12 @@ type RunConfig struct {
 func Run(cfg RunConfig, store *runlog.Store, stderr io.Writer) int {
 	started := time.Now().UTC()
 	job := strings.TrimSpace(cfg.JobID)
-	ns := strings.TrimSpace(cfg.Namespace)
-	key := strings.TrimSpace(cfg.JobKey)
-	if key == "" {
-		key = core.BuildJobKey(ns, job)
-	}
 
 	runID, err := store.StartRun(context.Background(), runlog.RunStart{
-		JobID:     job,
-		JobKey:    key,
-		Namespace: ns,
-		Command:   strings.Join(cfg.Command, " "),
-		PID:       os.Getpid(),
-		Started:   started,
+		JobID:   job,
+		Command: strings.Join(cfg.Command, " "),
+		PID:     os.Getpid(),
+		Started: started,
 	})
 	if err != nil {
 		fmt.Fprintln(stderr, err)
@@ -51,7 +41,7 @@ func Run(cfg RunConfig, store *runlog.Store, stderr io.Writer) int {
 
 	now := time.Now().UTC()
 	policy := BreakerPolicyFromEnv(stderr)
-	if open, until, err := store.IsBreakerOpen(context.Background(), key, now); err == nil && open {
+	if open, until, err := store.IsBreakerOpen(context.Background(), job, now); err == nil && open {
 		if err := store.FinishRun(context.Background(), runlog.RunFinish{
 			ID:         runID,
 			Finished:   now,
@@ -59,20 +49,6 @@ func Run(cfg RunConfig, store *runlog.Store, stderr io.Writer) int {
 			Status:     "skipped",
 			FailureCls: "circuit_open",
 			Notes:      "circuit breaker open until " + until.Format(time.RFC3339),
-		}); err != nil {
-			fmt.Fprintf(stderr, "beagle-run: warning: %v\n", err)
-		}
-		return 0
-	}
-
-	if ShouldSkipForTimezone(stderr) {
-		if err := store.FinishRun(context.Background(), runlog.RunFinish{
-			ID:         runID,
-			Finished:   now,
-			ExitCode:   0,
-			Status:     "skipped",
-			FailureCls: "tz_gate_skip",
-			Notes:      "schedule does not match configured timezone gate",
 		}); err != nil {
 			fmt.Fprintf(stderr, "beagle-run: warning: %v\n", err)
 		}
@@ -137,7 +113,7 @@ func Run(cfg RunConfig, store *runlog.Store, stderr io.Writer) int {
 	if err := store.FinishRun(context.Background(), finish); err != nil {
 		fmt.Fprintf(stderr, "beagle-run: warning: %v\n", err)
 	}
-	if err := store.RecordOutcome(context.Background(), key, time.Now().UTC(), finish.Status == "failed", policy); err != nil {
+	if err := store.RecordOutcome(context.Background(), job, time.Now().UTC(), finish.Status == "failed", policy); err != nil {
 		fmt.Fprintf(stderr, "beagle-run: warning: %v\n", err)
 	}
 

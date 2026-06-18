@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/amterp/beagle/internal/config"
+	"github.com/amterp/beagle/internal/core"
 )
 
 type fakeRunner struct {
@@ -39,24 +40,25 @@ func TestApplyWritesPlistAndBootstraps(t *testing.T) {
 
 	runner := &fakeRunner{}
 	summary, err := Apply(f, ApplyOptions{
-		HomeDir:    dir,
-		RunnerPath: runnerPath,
-		Runner:     runner,
-		Namespace:  "team_a",
+		HomeDir:        dir,
+		RunnerPath:     runnerPath,
+		SupervisorPath: runnerPath,
+		Runner:         runner,
 	})
 	if err != nil {
 		t.Fatalf("unexpected apply error: %v", err)
 	}
-	if summary.Created != 1 {
-		t.Fatalf("expected one created job, got %+v", summary)
+	// The job plus the always-present supervisor agent.
+	if summary.Created != 2 {
+		t.Fatalf("expected job + supervisor created, got %+v", summary)
 	}
 	if len(runner.calls) == 0 {
 		t.Fatal("expected launchctl calls")
 	}
 
 	paths, _ := filepath.Glob(filepath.Join(dir, "Library", "LaunchAgents", "com.beagle.*.plist"))
-	if len(paths) != 1 {
-		t.Fatalf("expected one plist, got %d", len(paths))
+	if len(paths) != 2 {
+		t.Fatalf("expected job + supervisor plists, got %d", len(paths))
 	}
 }
 
@@ -79,10 +81,10 @@ func TestApplyReportsRunnerErrors(t *testing.T) {
 
 	runner := &fakeRunner{err: errors.New("launchctl failed")}
 	summary, err := Apply(f, ApplyOptions{
-		HomeDir:    dir,
-		RunnerPath: runnerPath,
-		Runner:     runner,
-		Namespace:  "team_a",
+		HomeDir:        dir,
+		RunnerPath:     runnerPath,
+		SupervisorPath: runnerPath,
+		Runner:         runner,
 	})
 	if err == nil {
 		t.Fatal("expected error")
@@ -112,10 +114,10 @@ func TestApplyRebootstrapsUnloadedJob(t *testing.T) {
 	// First apply to create the plist
 	runner := &fakeRunner{}
 	_, err := Apply(f, ApplyOptions{
-		HomeDir:    dir,
-		RunnerPath: runnerPath,
-		Runner:     runner,
-		Namespace:  "team_a",
+		HomeDir:        dir,
+		RunnerPath:     runnerPath,
+		SupervisorPath: runnerPath,
+		Runner:         runner,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -137,17 +139,19 @@ func TestApplyRebootstrapsUnloadedJob(t *testing.T) {
 	}
 
 	summary, err := Apply(f, ApplyOptions{
-		HomeDir:    dir,
-		RunnerPath: runnerPath,
-		Runner:     printFailRunner,
-		Namespace:  "team_a",
+		HomeDir:        dir,
+		RunnerPath:     runnerPath,
+		SupervisorPath: runnerPath,
+		Runner:         printFailRunner,
 	})
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	_ = callCount
-	if summary.Updated != 1 {
-		t.Fatalf("expected 1 updated (re-bootstrapped), got %+v", summary)
+	// Both the job and the supervisor are present-but-not-loaded, so both
+	// re-bootstrap.
+	if summary.Updated != 2 {
+		t.Fatalf("expected 2 updated (job + supervisor re-bootstrapped), got %+v", summary)
 	}
 }
 
@@ -165,18 +169,35 @@ func (s *selectiveRunner) Run(name string, args ...string) error {
 	return nil
 }
 
-func TestApplyRemovesOnlyNamespaceManagedPlists(t *testing.T) {
+// TestApplyGarbageCollectsStrayManagedPlists verifies the global reconciliation:
+// any plist beagle manages for this user (matching com.beagle.<user>.*) that is
+// no longer backed by config - e.g. a pre-refactor orphan - is booted out and
+// removed. This is the behavior that the old per-namespace glob could not reach.
+func TestApplyGarbageCollectsStrayManagedPlists(t *testing.T) {
 	dir := t.TempDir()
 	runnerPath := filepath.Join(dir, "beagle-run")
 	if err := os.WriteFile(runnerPath, []byte("#!/bin/sh\n"), 0o755); err != nil {
 		t.Fatal(err)
 	}
+
+	uc, err := core.CurrentUserWithHome(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+
 	launchDir := filepath.Join(dir, "Library", "LaunchAgents")
 	if err := os.MkdirAll(launchDir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	other := filepath.Join(launchDir, "com.beagle.tester.team_b.worker_b.plist")
-	if err := os.WriteFile(other, []byte("other"), 0o644); err != nil {
+	orphanLabel := core.BuildLabel(uc.Username, "old_orphan")
+	orphan := core.PlistPath(dir, orphanLabel)
+	if err := os.WriteFile(orphan, []byte("orphan"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A plist for a different user must NOT be touched.
+	foreign := filepath.Join(launchDir, "com.beagle.someoneelse.worker_b.plist")
+	if err := os.WriteFile(foreign, []byte("foreign"), 0o644); err != nil {
 		t.Fatal(err)
 	}
 
@@ -192,14 +213,28 @@ func TestApplyRemovesOnlyNamespaceManagedPlists(t *testing.T) {
 	}
 	runner := &fakeRunner{}
 	if _, err := Apply(f, ApplyOptions{
-		HomeDir:    dir,
-		RunnerPath: runnerPath,
-		Runner:     runner,
-		Namespace:  "team_a",
+		HomeDir:        dir,
+		RunnerPath:     runnerPath,
+		SupervisorPath: runnerPath,
+		Runner:         runner,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := os.Stat(other); err != nil {
-		t.Fatalf("expected other namespace plist to remain: %v", err)
+
+	if _, err := os.Stat(orphan); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("expected stray managed plist to be reconciled away, stat err = %v", err)
+	}
+	if _, err := os.Stat(foreign); err != nil {
+		t.Fatalf("expected another user's plist to remain untouched: %v", err)
+	}
+
+	var sawBootout bool
+	for _, c := range runner.calls {
+		if strings.Contains(c, "bootout") && strings.Contains(c, orphanLabel) {
+			sawBootout = true
+		}
+	}
+	if !sawBootout {
+		t.Fatalf("expected a bootout for the orphan label %q, calls: %v", orphanLabel, runner.calls)
 	}
 }

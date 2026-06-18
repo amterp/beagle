@@ -11,9 +11,8 @@ import (
 )
 
 type OpsOptions struct {
-	HomeDir   string
-	Runner    CommandRunner
-	Namespace string
+	HomeDir string
+	Runner  CommandRunner
 }
 
 func RunNow(f config.File, jobID string, opts OpsOptions) error {
@@ -21,7 +20,25 @@ func RunNow(f config.File, jobID string, opts OpsOptions) error {
 	if err != nil {
 		return err
 	}
-	return runner.Run("launchctl", "kickstart", "-k", "gui/"+uc.UID+"/"+label)
+	return Kick(uc.UID, label, true, runner)
+}
+
+// Kick triggers an immediate run of a loaded job via launchctl kickstart.
+//
+// force adds -k, which kills any in-flight instance before starting a fresh
+// one - what a user means by `run-now`. The supervisor passes force=false so a
+// still-running job is left alone rather than being killed to start a duplicate
+// (its own schedule_state dedup, not kickstart, is the real double-run guard).
+func Kick(uid, label string, force bool, runner CommandRunner) error {
+	if runner == nil {
+		runner = ExecRunner{}
+	}
+	args := []string{"kickstart"}
+	if force {
+		args = append(args, "-k")
+	}
+	args = append(args, "gui/"+uid+"/"+label)
+	return runner.Run("launchctl", args...)
 }
 
 func Enable(f config.File, jobID string, opts OpsOptions) error {
@@ -55,8 +72,7 @@ func ReadLogs(f config.File, jobID string, stderr bool, tailLines int, opts OpsO
 	if stderr {
 		stream = "stderr"
 	}
-	namespace := core.NormalizeNamespace(opts.Namespace)
-	path := core.LogFilePath(uc.HomeDir, namespace, jobID, stream)
+	path := core.LogFilePath(uc.HomeDir, jobID, stream)
 	b, err := os.ReadFile(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
@@ -84,8 +100,7 @@ func jobRuntimeContext(f config.File, jobID string, opts OpsOptions) (uc core.Us
 	if !ok {
 		return core.UserContext{}, "", "", nil, fmt.Errorf("job not found: %s", jobID)
 	}
-	namespace := core.NormalizeNamespace(opts.Namespace)
-	label = core.BuildLabel(uc.Username, namespace, jobID)
+	label = core.BuildLabel(uc.Username, jobID)
 	plistPath = core.PlistPath(uc.HomeDir, label)
 	runner = opts.Runner
 	if runner == nil {

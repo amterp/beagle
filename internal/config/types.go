@@ -13,9 +13,9 @@ type File struct {
 type Defaults struct {
 	WorkingDir      string            `yaml:"working_dir"`
 	Env             map[string]string `yaml:"env"`
-	LogsDir         string            `yaml:"logs_dir"`
 	Timezone        string            `yaml:"timezone"`
 	ThrottleSeconds int               `yaml:"throttle_seconds"`
+	CatchUp         string            `yaml:"catch_up"`
 	CircuitBreaker  CircuitBreaker    `yaml:"circuit_breaker"`
 }
 
@@ -29,6 +29,7 @@ type Job struct {
 	Enabled         *bool             `yaml:"enabled"`
 	Restart         string            `yaml:"restart"`
 	ThrottleSeconds int               `yaml:"throttle_seconds"`
+	CatchUp         string            `yaml:"catch_up"`
 	Schedule        Schedule          `yaml:"schedule"`
 	CircuitBreaker  CircuitBreaker    `yaml:"circuit_breaker"`
 }
@@ -54,5 +55,6 @@ type ResolvedJob struct {
 	Restart        string
 	Schedule       Schedule
 	Throttle       time.Duration
+	CatchUp        time.Duration // 0 means strict (no catch-up beyond the scheduled minute)
 	CircuitBreaker CircuitBreaker
 }

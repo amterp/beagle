@@ -19,11 +19,10 @@ func TestRunSuccessfulCommand(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	exitCode := Run(RunConfig{
-		JobID:     "test-job",
-		Namespace: "test",
-		Command:   []string{"/bin/echo", "hello"},
-		Stdout:    &stdout,
-		Stderr:    &stderr,
+		JobID:   "test-job",
+		Command: []string{"/bin/echo", "hello"},
+		Stdout:  &stdout,
+		Stderr:  &stderr,
 	}, store, &stderr)
 
 	if exitCode != 0 {
@@ -31,7 +30,7 @@ func TestRunSuccessfulCommand(t *testing.T) {
 	}
 
 	// Verify the run was recorded
-	failures, err := store.RecentFailures(context.Background(), "test", "test-job", 10)
+	failures, err := store.RecentFailures(context.Background(), "test-job", 10)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -50,11 +49,10 @@ func TestRunFailedCommand(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	exitCode := Run(RunConfig{
-		JobID:     "test-job",
-		Namespace: "test",
-		Command:   []string{"/bin/sh", "-c", "exit 42"},
-		Stdout:    &stdout,
-		Stderr:    &stderr,
+		JobID:   "test-job",
+		Command: []string{"/bin/sh", "-c", "exit 42"},
+		Stdout:  &stdout,
+		Stderr:  &stderr,
 	}, store, &stderr)
 
 	if exitCode != 42 {
@@ -72,11 +70,10 @@ func TestRunExecError(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	exitCode := Run(RunConfig{
-		JobID:     "test-job",
-		Namespace: "test",
-		Command:   []string{"/nonexistent/binary"},
-		Stdout:    &stdout,
-		Stderr:    &stderr,
+		JobID:   "test-job",
+		Command: []string{"/nonexistent/binary"},
+		Stdout:  &stdout,
+		Stderr:  &stderr,
 	}, store, &stderr)
 
 	if exitCode != 127 {
