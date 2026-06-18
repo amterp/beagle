@@ -3,7 +3,7 @@ module github.com/amterp/beagle
 go 1.25.6
 
 require (
-	github.com/amterp/ra v0.4.3
+	github.com/amterp/ra v0.8.0
 	github.com/charmbracelet/lipgloss v1.1.0
 	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.44.3

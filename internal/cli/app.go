@@ -50,7 +50,9 @@ func (a *App) Run(args []string) error {
 	enableCmd := ra.NewCmd("enable").SetDescription("Enable a job")
 	disableCmd := ra.NewCmd("disable").SetDescription("Disable a job")
 	doctorCmd := ra.NewCmd("doctor").SetDescription("Run environment diagnostics")
-	superviseCmd := ra.NewCmd("supervise").SetDescription("(internal) Run one scheduler tick; invoked by launchd")
+	superviseCmd := ra.NewCmd("supervise").
+		SetDescription("Run one scheduler tick; invoked by launchd").
+		SetHidden(true)
 
 	statusJob, _ := ra.NewString("job").SetUsage("Job id").Register(statusCmd)
 	logsJob, _ := ra.NewString("job").SetUsage("Job id").Register(logsCmd)
