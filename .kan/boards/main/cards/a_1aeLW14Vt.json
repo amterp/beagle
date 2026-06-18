@@ -1,0 +1,16 @@
+{
+  "_v": 3,
+  "id": "a_1aeLW14Vt",
+  "alias": "auto-set-user",
+  "alias_explicit": false,
+  "title": "auto-set USER/LOGNAME for jobs (Keychain access)",
+  "description": "Jobs run under launchd bare env, where USER/LOGNAME are unset. Tools that read the macOS login Keychain (e.g. `claude -p` reading its subscription token) need them - without USER/LOGNAME, claude fails with \"Not logged in - Please run /login\".\n\nThis cost the most debugging time during the magpie integration. The magpie bin/scan wrapper currently works around it by setting USER/LOGNAME itself via `id -un`.\n\nProposal: beagle sets USER/LOGNAME in every job environment automatically (it already injects HOME-adjacent context and BEAGLE_* vars). Failing that, document the gotcha for jobs that shell out to claude or other keychain-backed tools.",
+  "creator": "Alexander Terp",
+  "created_at_millis": 1781802567571,
+  "updated_at_millis": 1781802567571,
+  "column": "backlog",
+  "position": "U",
+  "history": [
+    {"field":"column","value":"backlog","at":1781802567571}
+  ]
+}

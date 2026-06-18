@@ -1,0 +1,38 @@
+#!/usr/bin/env rad
+---
+Pattern hook for setting card type from title shortcuts like !bug, !feat, !chore.
+Receives card_id and board_name as arguments from Kan pattern hooks.
+---
+args:
+    card_id str
+    board_name str
+
+type_aliases = {
+    "feat": "feature",
+    "enh": "enhancement",
+}
+
+code, stdout = quiet $`kan show {card_id} -b {board_name} --json`
+if code != 0:
+    exit(1)
+
+card_data = parse_json(stdout)
+title = card_data["card"]["title"]
+
+if not matches(title, "![a-zA-Z]+", partial=true):
+    exit(0)
+
+match_result = replace(title, "(?i).*!([a-z]+).*", "$1")
+type_keyword = lower(match_result)
+
+card_type = type_keyword
+if type_keyword in type_aliases:
+    card_type = type_aliases[type_keyword]
+
+new_title = replace(title, "(?i)\\s*![a-z]+\\s*", " ")
+new_title = trim(new_title)
+new_title = replace(new_title, "\\s+", " ")
+
+quiet $`kan edit {card_id} -b {board_name} -t "{new_title}" -f type={card_type}`
+
+print("Set type to '{card_type}'")

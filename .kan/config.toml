@@ -1,0 +1,9 @@
+kan_schema = "project/2"
+id = "p_1aeAmFD4P"
+name = "beagle"
+
+[favicon]
+  background = "#84cc16"
+  icon_type = "letter"
+  letter = "B"
+  emoji = ""
