@@ -22,7 +22,6 @@ type JobSpec struct {
 	ThrottleSec int
 	Calendars   []Calendar
 	RunAtLoad   bool
-	Timezone    string
 }
 
 func BuildSpec(label string, rj config.ResolvedJob, runnerPath string, stdoutPath string, stderrPath string) (JobSpec, error) {
@@ -37,7 +36,6 @@ func BuildSpec(label string, rj config.ResolvedJob, runnerPath string, stdoutPat
 		Type:        rj.Type,
 		Restart:     rj.Restart,
 		ThrottleSec: int(rj.Throttle.Seconds()),
-		Timezone:    rj.Schedule.Timezone,
 	}
 	for k, v := range rj.Env {
 		spec.Env[k] = v
@@ -148,10 +146,6 @@ func RenderPlist(spec JobSpec) (string, error) {
 		}
 	}
 
-	if spec.Timezone != "" {
-		writeKeyString(&b, "BeagleTimezone", spec.Timezone)
-	}
-
 	if spec.Enabled {
 		writeKeyFalse(&b, "Disabled")
 	} else {
@@ -224,15 +218,6 @@ func writeDictString(b *bytes.Buffer, key string, value string) {
 	b.WriteString("    <string>")
 	b.WriteString(escape(value))
 	b.WriteString("</string>\n")
-}
-
-func writeDictInt(b *bytes.Buffer, key string, value int) {
-	b.WriteString("    <key>")
-	b.WriteString(escape(key))
-	b.WriteString("</key>\n")
-	b.WriteString("    <integer>")
-	b.WriteString(fmt.Sprintf("%d", value))
-	b.WriteString("</integer>\n")
 }
 
 func writeDictIntAt(b *bytes.Buffer, indent string, key string, value int) {
