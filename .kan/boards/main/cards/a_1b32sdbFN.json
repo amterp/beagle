@@ -1,0 +1,18 @@
+{
+  "_v": 3,
+  "alias": "apply-async-bootout",
+  "alias_explicit": false,
+  "column": "done",
+  "created_at_millis": 1781861433234,
+  "creator": "Alexander Terp",
+  "description": "Adding one job to `~/.beagle/jobs.yaml` and running `beagle apply` took down `loom_server_prod` (the prod API server) and left it down until a second `apply`. A transient launchd race shouldn't be able to strand a service that was running fine.\n\n**Mechanism**\n\nThe update path in `internal/launchd/apply.go` bootouts, rewrites the plist, then immediately bootstraps:\n\n```go\nif exists {\n    _ = runner.Run(\"launchctl\", \"bootout\", ...)        // ~188\n}\nos.WriteFile(path, ...)\nif err := runner.Run(\"launchctl\", \"bootstrap\", ...); err != nil {\n    summary.Errors = append(... \"bootstrap %s: %v\" ...) // ~195\n}\n```\n\n`launchctl bootout` is asynchronous - it returns before launchd has finished tearing the label down (more so when it must SIGTERM + reap a live service). The `bootstrap` that follows races the in-flight teardown, and launchd returns `5: Input/output error`. The bootout already succeeded, so the service is now stopped, and the failed bootstrap is only appended to `summary.Errors` - no retry, no recovery - so it stays down.\n\nObserved: first apply errored on both service jobs (`kan_serve`, `loom_server_prod`); `loom_server_prod` ended up stopped; a second `apply` brought it back.\n\n**Why a second apply heals it**\n\nThe unchanged-content branch (apply.go ~168-184) already self-heals: plist matches but `isJobLoaded` is false → re-bootstrap. By the second apply the plist matched and nothing was loaded to tear down, so no race. The recovery exists - it's just one apply late and absent from the update path.\n\n**What set it off**\n\nFirst apply reported `0 unchanged` (every plist re-rendered), later applies `5-6 unchanged`. Consistent with a beagle rebuild changing rendered output, so the first apply re-bootstrapped every job at once - the expected \"re-apply after upgrade\" flow, which tripped this race across all running services at once.\n\n**Direction**\n\nMake teardown synchronous: after `bootout`, poll `isJobLoaded` until the label's gone (bounded timeout) before `bootstrap`, or retry `bootstrap` on the transient error with backoff. And give the update path the same \"verify loaded, else recover\" check the unchanged path has, so a failed bootstrap never leaves a previously-running service down.\n\n**Open**\n\n- Is `5: Input/output error` specifically the still-loaded race, or a broader launchctl condition worth distinguishing before retrying?",
+  "id": "a_1b32sdbFN",
+  "position": "U",
+  "title": "apply: async bootout races bootstrap, stranding running services",
+  "type": "bug",
+  "updated_at_millis": 1781862985190,
+  "history": [
+    {"field":"column","value":"next","at":1781861433234},
+    {"field":"column","value":"done","at":1781862985190}
+  ]
+}
