@@ -6,10 +6,18 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/amterp/beagle/internal/config"
 	"github.com/amterp/beagle/internal/core"
 )
+
+func TestMain(m *testing.M) {
+	// Never actually sleep during reload's bootout-settle / bootstrap-retry
+	// loops, so the suite stays fast regardless of the configured intervals.
+	reloadSleep = func(time.Duration) {}
+	os.Exit(m.Run())
+}
 
 type fakeRunner struct {
 	calls []string
@@ -19,6 +27,24 @@ type fakeRunner struct {
 func (f *fakeRunner) Run(name string, args ...string) error {
 	f.calls = append(f.calls, name+" "+strings.Join(args, " "))
 	return f.err
+}
+
+// scriptRunner is a programmable CommandRunner: fn decides each call's result,
+// letting a test model stateful launchd behavior - e.g. "loaded until bootout,
+// then gone" or "bootstrap fails once then succeeds". calls records every
+// invocation as "name arg arg ...".
+type scriptRunner struct {
+	calls []string
+	fn    func(call string, calls []string) error
+}
+
+func (s *scriptRunner) Run(name string, args ...string) error {
+	call := name + " " + strings.Join(args, " ")
+	s.calls = append(s.calls, call)
+	if s.fn == nil {
+		return nil
+	}
+	return s.fn(call, s.calls)
 }
 
 func TestApplyWritesPlistAndBootstraps(t *testing.T) {
@@ -123,17 +149,9 @@ func TestApplyRebootstrapsUnloadedJob(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// Second apply with a runner that reports the job as NOT loaded
-	// (launchctl print returns error). The plist is identical, so normally
-	// it would be "unchanged", but since it's not loaded, we re-bootstrap.
-	callCount := 0
-	unloadedRunner := &fakeRunner{err: nil}
-	// Override to make "launchctl print" fail (job not loaded) but bootstrap succeed
-	unloadedRunner.err = nil
-	origRun := unloadedRunner.Run
-	_ = origRun // suppress unused
-
-	// Use a custom runner that fails on "print" but succeeds on "bootstrap"
+	// Second apply with a runner that reports the job as NOT loaded (launchctl
+	// print fails) but lets bootstrap succeed. The plist is identical, so the
+	// content-match path runs; since the job isn't loaded, it re-bootstraps.
 	printFailRunner := &selectiveRunner{
 		failOn: "launchctl print",
 	}
@@ -147,7 +165,6 @@ func TestApplyRebootstrapsUnloadedJob(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	_ = callCount
 	// Both the job and the supervisor are present-but-not-loaded, so both
 	// re-bootstrap.
 	if summary.Updated != 2 {
@@ -236,5 +253,171 @@ func TestApplyGarbageCollectsStrayManagedPlists(t *testing.T) {
 	}
 	if !sawBootout {
 		t.Fatalf("expected a bootout for the orphan label %q, calls: %v", orphanLabel, runner.calls)
+	}
+}
+
+// firstIndexWithPrefix returns the index of the first recorded call starting
+// with prefix, or -1.
+func firstIndexWithPrefix(calls []string, prefix string) int {
+	for i, c := range calls {
+		if strings.HasPrefix(c, prefix) {
+			return i
+		}
+	}
+	return -1
+}
+
+// TestReloadWaitsForBootoutThenBootstraps is the core of the fix: a loaded job
+// must be booted out and confirmed gone before we bootstrap, so the bootstrap
+// never races launchd's asynchronous teardown.
+func TestReloadWaitsForBootoutThenBootstraps(t *testing.T) {
+	bootedOut := false
+	pollsAfterBootout := 0
+	r := &scriptRunner{}
+	r.fn = func(call string, _ []string) error {
+		switch {
+		case strings.HasPrefix(call, "launchctl bootout"):
+			bootedOut = true
+			return nil
+		case strings.HasPrefix(call, "launchctl print"):
+			if !bootedOut {
+				return nil // loaded
+			}
+			// Teardown takes a couple of polls to settle, then the label is gone.
+			pollsAfterBootout++
+			if pollsAfterBootout < 3 {
+				return nil // still loaded
+			}
+			return errors.New("not loaded")
+		default: // bootstrap
+			return nil
+		}
+	}
+
+	if err := reload(r, "501", "com.beagle.test.job", "/tmp/job.plist"); err != nil {
+		t.Fatalf("reload returned error: %v", err)
+	}
+
+	bootoutIdx := firstIndexWithPrefix(r.calls, "launchctl bootout")
+	bootstrapIdx := firstIndexWithPrefix(r.calls, "launchctl bootstrap")
+	if bootoutIdx == -1 {
+		t.Fatalf("expected a bootout, calls: %v", r.calls)
+	}
+	if bootstrapIdx == -1 {
+		t.Fatalf("expected a bootstrap, calls: %v", r.calls)
+	}
+	if bootstrapIdx < bootoutIdx {
+		t.Fatalf("bootstrap ran before bootout, calls: %v", r.calls)
+	}
+	// There must be polling prints between bootout and bootstrap - that's the
+	// wait-until-gone that closes the race.
+	if bootstrapIdx-bootoutIdx < 2 {
+		t.Fatalf("expected polling prints between bootout and bootstrap, calls: %v", r.calls)
+	}
+}
+
+// TestReloadRetriesBootstrapOnTransientError covers a residual EIO that clears
+// on retry once the job is not loaded.
+func TestReloadRetriesBootstrapOnTransientError(t *testing.T) {
+	bootstraps := 0
+	r := &scriptRunner{}
+	r.fn = func(call string, _ []string) error {
+		switch {
+		case strings.HasPrefix(call, "launchctl print"):
+			return errors.New("not loaded")
+		case strings.HasPrefix(call, "launchctl bootstrap"):
+			bootstraps++
+			if bootstraps == 1 {
+				return errors.New("5: Input/output error")
+			}
+			return nil
+		default:
+			return nil
+		}
+	}
+
+	if err := reload(r, "501", "com.beagle.test.job", "/tmp/job.plist"); err != nil {
+		t.Fatalf("reload returned error: %v", err)
+	}
+	if bootstraps != 2 {
+		t.Fatalf("expected 2 bootstrap attempts, got %d", bootstraps)
+	}
+	if i := firstIndexWithPrefix(r.calls, "launchctl bootout"); i != -1 {
+		t.Fatalf("did not expect a bootout for an unloaded job, calls: %v", r.calls)
+	}
+}
+
+// TestReloadReturnsNilWhenBootstrapFailsButJobLoaded covers launchd reporting an
+// error from bootstrap yet completing the load anyway - we trust launchd's own
+// view and stop, rather than retrying into a duplicate.
+func TestReloadReturnsNilWhenBootstrapFailsButJobLoaded(t *testing.T) {
+	bootstrapped := false
+	bootstraps := 0
+	r := &scriptRunner{}
+	r.fn = func(call string, _ []string) error {
+		switch {
+		case strings.HasPrefix(call, "launchctl print"):
+			if bootstrapped {
+				return nil // launchd actually completed the load
+			}
+			return errors.New("not loaded")
+		case strings.HasPrefix(call, "launchctl bootstrap"):
+			bootstrapped = true
+			bootstraps++
+			return errors.New("5: Input/output error")
+		default:
+			return nil
+		}
+	}
+
+	if err := reload(r, "501", "com.beagle.test.job", "/tmp/job.plist"); err != nil {
+		t.Fatalf("reload returned error: %v", err)
+	}
+	if bootstraps != 1 {
+		t.Fatalf("expected exactly 1 bootstrap (fails-but-loaded short-circuits), got %d", bootstraps)
+	}
+}
+
+// TestReloadReturnsErrorWhenBootstrapNeverSucceeds verifies the retry is bounded
+// and a genuinely failing bootstrap is surfaced rather than hung on.
+func TestReloadReturnsErrorWhenBootstrapNeverSucceeds(t *testing.T) {
+	bootstraps := 0
+	r := &scriptRunner{}
+	r.fn = func(call string, _ []string) error {
+		switch {
+		case strings.HasPrefix(call, "launchctl print"):
+			return errors.New("not loaded")
+		case strings.HasPrefix(call, "launchctl bootstrap"):
+			bootstraps++
+			return errors.New("5: Input/output error")
+		default:
+			return nil
+		}
+	}
+
+	if err := reload(r, "501", "com.beagle.test.job", "/tmp/job.plist"); err == nil {
+		t.Fatal("expected reload to return an error when bootstrap never succeeds")
+	}
+	if bootstraps != bootstrapAttempts {
+		t.Fatalf("expected %d bootstrap attempts, got %d", bootstrapAttempts, bootstraps)
+	}
+}
+
+// TestReloadSkipsBootoutWhenNotLoaded confirms the bootout is gated on load
+// state - a not-loaded label (new job / manually unloaded) bootstraps directly.
+func TestReloadSkipsBootoutWhenNotLoaded(t *testing.T) {
+	r := &scriptRunner{}
+	r.fn = func(call string, _ []string) error {
+		if strings.HasPrefix(call, "launchctl print") {
+			return errors.New("not loaded")
+		}
+		return nil // bootstrap succeeds
+	}
+
+	if err := reload(r, "501", "com.beagle.test.job", "/tmp/job.plist"); err != nil {
+		t.Fatalf("reload returned error: %v", err)
+	}
+	if i := firstIndexWithPrefix(r.calls, "launchctl bootout"); i != -1 {
+		t.Fatalf("did not expect a bootout when the job is not loaded, calls: %v", r.calls)
 	}
 }

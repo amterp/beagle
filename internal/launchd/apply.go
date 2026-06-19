@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/amterp/beagle/internal/config"
 	"github.com/amterp/beagle/internal/core"
@@ -173,10 +174,7 @@ func Apply(f config.File, opts ApplyOptions) (Summary, error) {
 				summary.Unchanged++
 				continue
 			}
-			// Best-effort bootout first to clear any stale launchd state,
-			// matching the normal update path below.
-			_ = runner.Run("launchctl", "bootout", "gui/"+uc.UID+"/"+label)
-			if err := runner.Run("launchctl", "bootstrap", "gui/"+uc.UID, path); err != nil {
+			if err := reload(runner, uc.UID, label, path); err != nil {
 				summary.Errors = append(summary.Errors, fmt.Sprintf("re-bootstrap %s: %v", label, err))
 			} else {
 				summary.Updated++
@@ -184,15 +182,12 @@ func Apply(f config.File, opts ApplyOptions) (Summary, error) {
 			continue
 		}
 
-		if exists {
-			_ = runner.Run("launchctl", "bootout", "gui/"+uc.UID+"/"+label)
-		}
 		if err := os.WriteFile(path, []byte(content), 0o644); err != nil {
 			summary.Errors = append(summary.Errors, fmt.Sprintf("write %s: %v", path, err))
 			continue
 		}
 
-		if err := runner.Run("launchctl", "bootstrap", "gui/"+uc.UID, path); err != nil {
+		if err := reload(runner, uc.UID, label, path); err != nil {
 			summary.Errors = append(summary.Errors, fmt.Sprintf("bootstrap %s: %v", label, err))
 		} else if exists {
 			summary.Updated++
@@ -214,6 +209,49 @@ func isJobLoaded(runner CommandRunner, uid string, label string) bool {
 	// Using the runner so tests with fakeRunner can control this behavior.
 	err := runner.Run("launchctl", "print", "gui/"+uid+"/"+label)
 	return err == nil
+}
+
+const (
+	reloadPollInterval = 50 * time.Millisecond
+	reloadPollAttempts = 120 // ~6s ceiling; returns the instant the label is gone
+	bootstrapAttempts  = 3
+)
+
+// reloadSleep is a test seam; production always uses time.Sleep.
+var reloadSleep = time.Sleep
+
+// reload tears down a launchd label (if loaded) and bootstraps it from
+// plistPath, tolerating launchd's asynchronous bootout. "launchctl bootout"
+// returns before launchd has finished reaping the job, so a bootstrap issued
+// right after races the in-flight teardown and fails with EIO
+// ("5: Input/output error"), stranding a previously-running service. We make
+// teardown synchronous: bootout, poll until the label is gone, then bootstrap,
+// re-checking isJobLoaded after each attempt. Returns nil only once the label
+// is confirmed loaded. The caller must write plistPath before calling reload.
+func reload(runner CommandRunner, uid, label, plistPath string) error {
+	target := "gui/" + uid + "/" + label
+	domain := "gui/" + uid
+
+	if isJobLoaded(runner, uid, label) {
+		_ = runner.Run("launchctl", "bootout", target)
+		for i := 0; i < reloadPollAttempts && isJobLoaded(runner, uid, label); i++ {
+			reloadSleep(reloadPollInterval)
+		}
+	}
+
+	var err error
+	for i := 0; i < bootstrapAttempts; i++ {
+		if err = runner.Run("launchctl", "bootstrap", domain, plistPath); err == nil {
+			return nil
+		}
+		// bootstrap can report EIO yet still complete the load; trust launchd's
+		// own view over the command's exit status.
+		if isJobLoaded(runner, uid, label) {
+			return nil
+		}
+		reloadSleep(reloadPollInterval)
+	}
+	return err
 }
 
 func resolveRunnerPath(path string) (string, error) {

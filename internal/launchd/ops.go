@@ -46,8 +46,7 @@ func Enable(f config.File, jobID string, opts OpsOptions) error {
 	if err != nil {
 		return err
 	}
-	_ = runner.Run("launchctl", "bootout", "gui/"+uc.UID+"/"+label)
-	return runner.Run("launchctl", "bootstrap", "gui/"+uc.UID, plistPath)
+	return reload(runner, uc.UID, label, plistPath)
 }
 
 func Disable(f config.File, jobID string, opts OpsOptions) error {
