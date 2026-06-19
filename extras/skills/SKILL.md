@@ -126,3 +126,15 @@ Global flag: `--config <path>` (defaults to `~/.beagle/jobs.yaml`).
 5. `beagle doctor` to verify the environment - including that the supervisor is loaded and ticking (if it isn't, no
    scheduled job will fire).
 6. `beagle run-now <job>` to trigger a manual run and observe behavior.
+
+### After Upgrading or Changing Beagle
+
+After installing a new beagle version (or otherwise changing beagle itself), re-check the existing install before
+trusting it. An API, config-schema, plist, or DB-schema change can leave already-installed jobs stale or silently not
+firing:
+
+1. `beagle validate` - confirm `~/.beagle/jobs.yaml` still parses under the new rules.
+2. `beagle apply` - re-reconcile the jobs and the supervisor (plists embed absolute binary paths, so a rebuilt or moved
+   binary needs a fresh `apply` to re-point them).
+3. `beagle doctor` - confirm the supervisor is loaded and ticking.
+4. `beagle ls` - spot-check job state and last-run health.
