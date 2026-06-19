@@ -157,8 +157,7 @@ func (a *App) runValidate(configPath string) error {
 		return fmt.Errorf("%s %v", errStyle.Render("validation failed:"), err)
 	}
 
-	fmt.Fprintln(a.out, titleStyle.Render("Beagle Config"))
-	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render("OK"), infoStyle.Render(path))
+	fmt.Fprintf(a.out, "%s  %s\n", okStyle.Render(glyphOK+" config valid"), dimStyle.Render(path))
 	return nil
 }
 
@@ -173,13 +172,9 @@ func (a *App) runApply(configPath string) error {
 	}
 
 	summary, err := launchd.Apply(cfg, launchd.ApplyOptions{})
-	fmt.Fprintln(a.out, titleStyle.Render("Beagle Apply"))
-	fmt.Fprintf(a.out, "created: %d, updated: %d, removed: %d, unchanged: %d\n",
-		summary.Created, summary.Updated, summary.Removed, summary.Unchanged)
-	if len(summary.Errors) > 0 {
-		for _, e := range summary.Errors {
-			fmt.Fprintf(a.out, "- %s\n", e)
-		}
+	fmt.Fprintln(a.out, applyLine(summary))
+	for _, e := range summary.Errors {
+		fmt.Fprintf(a.out, "%s %s\n", failStyle.Render(glyphFail), e)
 	}
 	if err != nil {
 		return fmt.Errorf("%s %v", errStyle.Render("apply failed:"), err)
@@ -201,20 +196,26 @@ func (a *App) runList(configPath string) error {
 		return fmt.Errorf("%s %v", errStyle.Render("list failed:"), err)
 	}
 
+	if len(items) == 0 {
+		fmt.Fprintln(a.out, infoStyle.Render("no jobs configured"))
+		return nil
+	}
+
 	health := loadJobHealth()
 
-	fmt.Fprintln(a.out, titleStyle.Render("Beagle Jobs"))
+	rows := make([][]string, 0, len(items))
 	for _, item := range items {
-		state := "not-loaded"
-		if item.Loaded {
-			state = "loaded"
-		}
-		line := fmt.Sprintf("- %s (%s) enabled=%t state=%s", item.ID, item.Type, item.Enabled, state)
-		if h, ok := health[item.ID]; ok {
-			line += " " + h
-		}
-		fmt.Fprintln(a.out, line)
+		summary, ok := health[item.ID]
+		rows = append(rows, []string{
+			item.ID,
+			item.Type,
+			yesNo(item.Enabled),
+			stateCell(item),
+			runOutcome(summary, ok),
+			runWhen(summary, ok),
+		})
 	}
+	fmt.Fprint(a.out, table([]string{"JOB", "TYPE", "ENABLED", "STATE", "LAST RUN", ""}, rows))
 	return nil
 }
 
@@ -234,17 +235,20 @@ func (a *App) runStatus(configPath string, jobID string) error {
 	if err != nil {
 		return fmt.Errorf("%s %v", errStyle.Render("status failed:"), err)
 	}
-	fmt.Fprintln(a.out, titleStyle.Render("Beagle Status"))
-	fmt.Fprintf(a.out, "job: %s\n", item.ID)
-	fmt.Fprintf(a.out, "type: %s\n", item.Type)
-	fmt.Fprintf(a.out, "configured: %t\n", item.Enabled)
-	fmt.Fprintf(a.out, "active: %t\n", item.Loaded)
-	if item.Disabled {
-		fmt.Fprintln(a.out, "runtime state: paused")
+	pairs := [][2]string{
+		{"job", item.ID},
+		{"type", item.Type},
+		{"enabled", yesNo(item.Enabled)},
+		{"state", stateCell(item)},
 	}
-	if h, ok := loadJobHealth()[item.ID]; ok {
-		fmt.Fprintf(a.out, "last run: %s\n", h)
+	if summary, ok := loadJobHealth()[item.ID]; ok {
+		lastRun := runOutcome(summary, true)
+		if when := runWhen(summary, true); when != "" {
+			lastRun += "  " + when
+		}
+		pairs = append(pairs, [2]string{"last run", lastRun})
 	}
+	fmt.Fprint(a.out, kv(pairs))
 	return nil
 }
 
@@ -254,45 +258,44 @@ func (a *App) runDoctor() error {
 		return fmt.Errorf("%s %v", errStyle.Render("doctor failed:"), err)
 	}
 
-	fmt.Fprintln(a.out, titleStyle.Render("Beagle Doctor"))
-	fmt.Fprintf(a.out, "home dir ready: %t\n", report.HomeDirOK)
-	fmt.Fprintf(a.out, "scheduler backend ready: %t\n", report.LaunchAgentsOK && report.LaunchctlOK)
-	fmt.Fprintf(a.out, "runner found: %t\n", report.RunnerOK)
-	fmt.Fprintf(a.out, "supervisor loaded: %t\n", report.SupervisorLoaded)
-	fmt.Fprintf(a.out, "supervisor ticking: %s\n", supervisorTickStatus())
-	if len(report.Issues) > 0 {
-		for _, issue := range report.Issues {
-			fmt.Fprintf(a.out, "- %s\n", issue)
-		}
+	ticking, tickDetail := supervisorTickStatus()
+	fmt.Fprintln(a.out, check(report.HomeDirOK, "home directory", ""))
+	fmt.Fprintln(a.out, check(report.LaunchAgentsOK && report.LaunchctlOK, "scheduler backend", ""))
+	fmt.Fprintln(a.out, check(report.RunnerOK, "runner found", ""))
+	fmt.Fprintln(a.out, check(report.SupervisorLoaded, "supervisor loaded", ""))
+	fmt.Fprintln(a.out, check(ticking, "supervisor ticking", tickDetail))
+	for _, issue := range report.Issues {
+		fmt.Fprintf(a.out, "%s %s\n", failStyle.Render(glyphFail), issue)
 	}
 	return nil
 }
 
-// supervisorTickStatus reports how recently the supervisor stamped its
-// heartbeat. A loaded-but-not-ticking supervisor means scheduled jobs are
-// silently not firing - the exact failure this surfaces.
-func supervisorTickStatus() string {
+// supervisorTickStatus reports whether the supervisor is ticking and a styled
+// detail. A loaded-but-not-ticking supervisor means scheduled jobs are silently
+// not firing - the exact failure this surfaces. Stale/never/unknown all read as
+// not-ticking so doctor flags them with a red ✗.
+func supervisorTickStatus() (ok bool, detail string) {
 	dbPath, err := runlog.DefaultPath()
 	if err != nil {
-		return "unknown"
+		return false, dimStyle.Render("unknown")
 	}
 	if _, err := os.Stat(dbPath); err != nil {
-		return "never"
+		return false, dimStyle.Render("never")
 	}
 	store, err := runlog.Open(dbPath)
 	if err != nil {
-		return "unknown"
+		return false, dimStyle.Render("unknown")
 	}
 	defer store.Close()
-	_, ts, ok, err := store.GetMeta(context.Background(), supervisor.TickHeartbeatKey)
-	if err != nil || !ok {
-		return "never"
+	_, ts, found, err := store.GetMeta(context.Background(), supervisor.TickHeartbeatKey)
+	if err != nil || !found {
+		return false, dimStyle.Render("never")
 	}
-	age := time.Since(ts)
+	age := time.Since(ts).Round(time.Second)
 	if age <= 3*time.Minute {
-		return fmt.Sprintf("yes (%s ago)", age.Round(time.Second))
+		return true, dimStyle.Render(fmt.Sprintf("%s ago", age))
 	}
-	return fmt.Sprintf("STALE (%s ago)", age.Round(time.Second))
+	return false, warnStyle.Render(fmt.Sprintf("stale %s ago", age))
 }
 
 func (a *App) runLogs(configPath string, jobID string, stderr bool, tail int) error {
@@ -338,11 +341,16 @@ func (a *App) runFailures(jobID string, limit int) error {
 		fmt.Fprintln(a.out, infoStyle.Render("no failures recorded"))
 		return nil
 	}
-	fmt.Fprintln(a.out, titleStyle.Render("Beagle Failures"))
+	rows := make([][]string, 0, len(failures))
 	for _, f := range failures {
-		fmt.Fprintf(a.out, "- %s %s exit=%d class=%s\n",
-			f.StartedAt.Format("2006-01-02 15:04:05"), f.JobID, f.ExitCode, f.FailureCls)
+		rows = append(rows, []string{
+			dimStyle.Render(f.StartedAt.Local().Format("01-02 15:04:05")),
+			f.JobID,
+			failStyle.Render(fmt.Sprintf("exit %d", f.ExitCode)),
+			dimStyle.Render(f.FailureCls),
+		})
 	}
+	fmt.Fprint(a.out, table([]string{"TIME", "JOB", "EXIT", "CLASS"}, rows))
 	return nil
 }
 
@@ -361,7 +369,7 @@ func (a *App) runNow(configPath string, jobID string) error {
 	if err := launchd.RunNow(cfg, jobID, launchd.OpsOptions{}); err != nil {
 		return fmt.Errorf("%s %v", errStyle.Render("run-now failed:"), err)
 	}
-	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render("triggered"), jobID)
+	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render(glyphOK+" triggered"), jobID)
 	return nil
 }
 
@@ -380,7 +388,7 @@ func (a *App) runEnable(configPath string, jobID string) error {
 	if err := launchd.Enable(cfg, jobID, launchd.OpsOptions{}); err != nil {
 		return fmt.Errorf("%s %v", errStyle.Render("enable failed:"), err)
 	}
-	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render("enabled"), jobID)
+	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render(glyphOK+" enabled"), jobID)
 	return nil
 }
 
@@ -399,7 +407,7 @@ func (a *App) runDisable(configPath string, jobID string) error {
 	if err := launchd.Disable(cfg, jobID, launchd.OpsOptions{}); err != nil {
 		return fmt.Errorf("%s %v", errStyle.Render("disable failed:"), err)
 	}
-	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render("disabled"), jobID)
+	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render(glyphOK+" disabled"), jobID)
 	return nil
 }
 
@@ -425,10 +433,11 @@ func resolveConfigPath(configPath string) (string, error) {
 	return path, nil
 }
 
-// loadJobHealth reads the most recent run outcome per job from the run-log DB,
-// so ls/status can surface "loaded but failing" rather than just "loaded".
-// Best-effort: any error yields an empty map and callers degrade gracefully.
-func loadJobHealth() map[string]string {
+// loadJobHealth reads the most recent run per job from the run-log DB, keyed by
+// job id, so ls/status can surface "loaded but failing" rather than just
+// "loaded". The render layer owns all formatting. Best-effort: any error yields
+// an empty map and callers degrade gracefully.
+func loadJobHealth() map[string]runlog.RunSummary {
 	dbPath, err := runlog.DefaultPath()
 	if err != nil {
 		return nil
@@ -445,13 +454,9 @@ func loadJobHealth() map[string]string {
 	if err != nil {
 		return nil
 	}
-	out := make(map[string]string, len(summaries))
+	out := make(map[string]runlog.RunSummary, len(summaries))
 	for _, s := range summaries {
-		desc := s.Status
-		if s.Status != "succeeded" && s.Status != "running" {
-			desc = fmt.Sprintf("%s(exit=%d)", s.Status, s.ExitCode)
-		}
-		out[s.JobID] = fmt.Sprintf("last=%s@%s", desc, s.StartedAt.Local().Format("01-02 15:04"))
+		out[s.JobID] = s
 	}
 	return out
 }

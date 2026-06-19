@@ -26,8 +26,8 @@ jobs:
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if !strings.Contains(out.String(), "OK") {
-		t.Fatalf("expected OK output, got: %s", out.String())
+	if !strings.Contains(out.String(), "config valid") {
+		t.Fatalf("expected valid-config output, got: %s", out.String())
 	}
 }
 
