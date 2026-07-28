@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -117,27 +118,64 @@ func Validate(f File) error {
 }
 
 // maxCatchUp bounds how late a missed schedule job may run. It also caps how
-// far back the supervisor scans for a missed occurrence.
-const maxCatchUp = 168 * time.Hour // 7 days
+// far back the supervisor scans for a missed occurrence - CronSpec.PrevFire
+// skips non-matching dates whole, so even the largest window costs microseconds
+// per tick, but the bound is what keeps that cost constant instead of growing
+// with uptime. It also catches a fat-fingered window: past about a year the
+// right answer is a report that the job has never run, not a surprise run.
+//
+// 366 rather than 365 days so an annual schedule still catches up across a leap
+// year, where consecutive occurrences are 366 days apart.
+const maxCatchUp = 366 * 24 * time.Hour
 
-// ParseCatchUp interprets a catch_up value. Empty means "inherit"; "none"
-// (and 0) mean strict - only fire at the scheduled minute. Otherwise it must be
-// a positive Go duration (e.g. 6h, 90m) no larger than maxCatchUp. Note that Go
-// durations do not accept a "d" (days) unit, so 7 days is written as 168h.
+// maxCatchUpText is how maxCatchUp is written in errors. time.Duration renders
+// it as 8784h0m0s, which tells a reader nothing about the limit they just hit.
+const maxCatchUpText = "366d"
+
+// calendarUnitRe matches the d (day) and w (week) unit suffixes that Go's
+// time.ParseDuration rejects. No Go unit (ns, us, ms, s, m, h) contains a d or
+// w, so this cannot match inside one.
+var calendarUnitRe = regexp.MustCompile(`(\d+(?:\.\d+)?)([dw])`)
+
+// expandCalendarUnits rewrites d and w suffixes into hours so time.ParseDuration
+// can take over: "2w3d" becomes "336h72h", which it sums. Days and weeks are
+// fixed 24h and 168h spans, not calendar offsets. That is the right meaning
+// here: catch_up budgets how much elapsed lateness is tolerable, it does not
+// decide when a job fires - CronSpec.PrevFire owns that, in the job's timezone -
+// so a DST day still spends exactly 24h of the window.
+func expandCalendarUnits(s string) string {
+	return calendarUnitRe.ReplaceAllStringFunc(s, func(match string) string {
+		parts := calendarUnitRe.FindStringSubmatch(match)
+		n, err := strconv.ParseFloat(parts[1], 64)
+		if err != nil {
+			return match // leave it for time.ParseDuration to reject
+		}
+		hours := n * 24
+		if parts[2] == "w" {
+			hours = n * 24 * 7
+		}
+		return strconv.FormatFloat(hours, 'f', -1, 64) + "h"
+	})
+}
+
+// ParseCatchUp interprets a catch_up value. Empty means "inherit"; "none" (and
+// 0) mean strict - only fire at the scheduled minute. Otherwise it must be a
+// positive duration no larger than maxCatchUp, in Go's duration syntax extended
+// with d (days) and w (weeks): 6h, 90m, 3d, 2w, 1d12h.
 func ParseCatchUp(s string) (time.Duration, error) {
 	s = strings.TrimSpace(strings.ToLower(s))
 	if s == "" || s == "none" {
 		return 0, nil
 	}
-	d, err := time.ParseDuration(s)
+	d, err := time.ParseDuration(expandCalendarUnits(s))
 	if err != nil {
-		return 0, fmt.Errorf("invalid catch_up %q (use none or a duration like 6h or 90m; days like 1d are not supported - use 24h)", s)
+		return 0, fmt.Errorf("invalid catch_up %q (use none, or a duration like 6h, 90m, 3d or 2w)", s)
 	}
 	if d <= 0 {
 		return 0, fmt.Errorf("catch_up %q must be positive or none", s)
 	}
 	if d > maxCatchUp {
-		return 0, fmt.Errorf("catch_up %s exceeds the maximum of %s", d, maxCatchUp)
+		return 0, fmt.Errorf("catch_up %s exceeds the maximum of %s", s, maxCatchUpText)
 	}
 	return d, nil
 }

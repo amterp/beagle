@@ -70,6 +70,24 @@ func parseSet(field string, min, max int) (map[int]struct{}, bool, error) {
 // when both are restricted, a match on either suffices; otherwise each
 // restricted field must match.
 func (c CronSpec) Matches(t time.Time) bool {
+	return c.dateMatches(t) && c.timeMatches(t)
+}
+
+// dateMatches is the day-granular half of Matches: month plus the dom/dow rule.
+// Every instant whose wall clock falls on a given local date shares these
+// fields, so when this is false no instant on that date can match - which is
+// what lets PrevFire skip a whole day in one step instead of 1440.
+func (c CronSpec) dateMatches(t time.Time) bool {
+	if !c.monthWild {
+		if _, ok := c.months[int(t.Month())]; !ok {
+			return false
+		}
+	}
+	return c.dayMatches(t)
+}
+
+// timeMatches is the minute-granular half of Matches.
+func (c CronSpec) timeMatches(t time.Time) bool {
 	if !c.minWild {
 		if _, ok := c.minutes[t.Minute()]; !ok {
 			return false
@@ -80,12 +98,7 @@ func (c CronSpec) Matches(t time.Time) bool {
 			return false
 		}
 	}
-	if !c.monthWild {
-		if _, ok := c.months[int(t.Month())]; !ok {
-			return false
-		}
-	}
-	return c.dayMatches(t)
+	return true
 }
 
 func (c CronSpec) dayMatches(t time.Time) bool {
@@ -112,6 +125,14 @@ func (c CronSpec) dayMatches(t time.Time) bool {
 //   - fall-back: the repeated wall-clock minute matches at two instants; this
 //     returns the later one. Callers that must fire an occurrence once should
 //     dedup on the wall-clock identity, not the raw instant.
+//
+// Local dates whose month/dom/dow cannot match are skipped whole rather than a
+// minute at a time, which is what keeps a year-long lookback affordable at one
+// supervisor tick per minute: a few hundred steps instead of ~525,600, measured
+// at 24us against the old scan's 19.2ms. The remaining minute-by-minute work is
+// bounded by one local day per date that matches at day level but yields no
+// fire, which only happens when every scheduled (hour, minute) on that date
+// falls in a DST gap.
 func (c CronSpec) PrevFire(now time.Time, loc *time.Location, maxLookback time.Duration) (time.Time, bool) {
 	if loc == nil {
 		loc = time.UTC
@@ -119,10 +140,59 @@ func (c CronSpec) PrevFire(now time.Time, loc *time.Location, maxLookback time.D
 	cand := now.Truncate(time.Minute)
 	limit := cand.Add(-maxLookback)
 	for !cand.Before(limit) {
-		if c.Matches(cand.In(loc)) {
+		wall := cand.In(loc)
+		if !c.dateMatches(wall) {
+			cand = prevDateEnd(cand, loc)
+			continue
+		}
+		if c.timeMatches(wall) {
 			return cand, true
 		}
 		cand = cand.Add(-time.Minute)
 	}
 	return time.Time{}, false
+}
+
+// prevDateEnd returns the last minute-aligned instant strictly before the start
+// of cand's local date. Jumping there can only skip instants sharing cand's
+// local date, which the caller has already ruled out.
+//
+// It deliberately does not build the boundary with time.Date. Local midnight
+// does not exist in every zone - America/Havana, Asia/Beirut, Africa/Cairo and
+// Antarctica/Casey among others still transition at midnight - and time.Date's
+// result for a nonexistent wall clock is explicitly not guaranteed. For Havana
+// on 2026-03-08 (00:00 -> 01:00) time.Date resolves to 2026-03-07 23:00, so
+// subtracting a minute from it would skip 23:00-23:59 on the 7th unseen.
+//
+// The subtraction below is only a starting guess; correctness comes from the
+// two boundary loops, which hold for any transition size - including
+// Pacific/Apia's 2011 skip of an entire local day. The guess is at least one
+// minute and the loops never carry the result to or past cand, so PrevFire
+// always makes backward progress and cannot spin.
+//
+// This assumes a local date is a contiguous run of instants. That holds for
+// every transition in tzdata since 2011; the counterexamples (America/Goose_Bay
+// under Newfoundland's old 00:01 DST rule) are older than any catch-up window
+// can reach.
+func prevDateEnd(cand time.Time, loc *time.Location) time.Time {
+	wall := cand.In(loc)
+	y, m, d := wall.Date()
+
+	t := cand.Add(-time.Duration(wall.Hour()*60+wall.Minute()+1) * time.Minute)
+	// Clocks moved forward inside the date, so the guess overshot: walk up until
+	// the next minute is back inside it. Bounded by cand, which is on the date.
+	for !onDate(t.Add(time.Minute), loc, y, m, d) {
+		t = t.Add(time.Minute)
+	}
+	// Clocks moved back inside the date, so the guess is still inside it: walk
+	// out. Bounded by the length of the local date.
+	for onDate(t, loc, y, m, d) {
+		t = t.Add(-time.Minute)
+	}
+	return t
+}
+
+func onDate(t time.Time, loc *time.Location, y int, m time.Month, d int) bool {
+	ty, tm, td := t.In(loc).Date()
+	return ty == y && tm == m && td == d
 }

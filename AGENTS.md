@@ -32,3 +32,10 @@ The same applies after bumping the installed beagle version for any reason.
 The run-log DB tracks a schema version and wipes a foreign schema on open, so
 a version jump can reset run history - that's expected, but verify jobs still
 fire afterward.
+
+A wipe also clears `schedule_state`, the per-job record of which occurrence was
+last handled. The supervisor then treats every schedule job as newly seen and
+adopts its most recent occurrence as a baseline rather than running it, so one
+genuinely missed run per catch-up job can be dropped across such an upgrade.
+Carrying `schedule_state` across a schema rebuild would remove that hazard and
+is worth doing before the next schema change.

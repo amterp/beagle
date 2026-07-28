@@ -134,3 +134,174 @@ func TestPrevFireFallBack(t *testing.T) {
 		t.Fatalf("expected the later (EST) 01:30 instant %v, got %v", est, got)
 	}
 }
+
+// prevFireNaive is the minute-by-minute scan PrevFire used before it learned to
+// skip non-matching dates. It is kept as the reference implementation for
+// TestPrevFireMatchesNaive: the skip is meant to be a pure speedup, so any
+// disagreement between the two is a bug in the skip.
+func prevFireNaive(c CronSpec, now time.Time, loc *time.Location, maxLookback time.Duration) (time.Time, bool) {
+	if loc == nil {
+		loc = time.UTC
+	}
+	cand := now.Truncate(time.Minute)
+	limit := cand.Add(-maxLookback)
+	for !cand.Before(limit) {
+		if c.Matches(cand.In(loc)) {
+			return cand, true
+		}
+		cand = cand.Add(-time.Minute)
+	}
+	return time.Time{}, false
+}
+
+// TestPrevFireMatchesNaive is the backbone guarding the day-skip. It sweeps
+// zones chosen for awkward transitions - midnight gaps (Havana, Beirut, Cairo,
+// Santiago), a three-hour gap (Casey), a half-hour DST (Lord Howe) and a whole
+// skipped local day (Apia) - against the pre-optimization scan.
+func TestPrevFireMatchesNaive(t *testing.T) {
+	zones := []string{
+		"UTC",
+		"America/New_York",
+		"America/Havana",
+		"Asia/Beirut",
+		"Africa/Cairo",
+		"America/Santiago",
+		"Antarctica/Casey",
+		"Pacific/Apia",
+		"Australia/Lord_Howe",
+	}
+	crons := []string{
+		"* * * * *",
+		"0 7 * * *",
+		"30 2 * * *",
+		"30 1 * * *",
+		"0 0 * * *",
+		"59 23 * * *",
+		"0 5 1 * *",
+		"0 0 13 * 5",
+		"*/17 * * * *",
+		"0 5 29 2 *",
+	}
+	// Anchored on real transitions: US spring-forward and fall-back, Havana's
+	// midnight gap, Casey's three-hour jump, Apia's skipped day, plus a neutral
+	// date and a leap day.
+	starts := []time.Time{
+		time.Date(2026, 3, 9, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 11, 2, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 3, 9, 3, 0, 0, 0, time.UTC),
+		time.Date(2016, 10, 23, 6, 0, 0, 0, time.UTC),
+		time.Date(2012, 1, 1, 6, 0, 0, 0, time.UTC),
+		time.Date(2026, 6, 18, 9, 15, 0, 0, time.UTC),
+		time.Date(2024, 3, 1, 0, 30, 0, 0, time.UTC),
+	}
+	lookbacks := []time.Duration{6 * time.Hour, 48 * time.Hour, 7 * 24 * time.Hour}
+
+	for _, zone := range zones {
+		loc, err := time.LoadLocation(zone)
+		if err != nil {
+			t.Skipf("tzdata unavailable: %v", err)
+		}
+		for _, cron := range crons {
+			c := mustParseSpec(t, cron)
+			for _, start := range starts {
+				for _, lb := range lookbacks {
+					wantT, wantOK := prevFireNaive(c, start, loc, lb)
+					gotT, gotOK := c.PrevFire(start, loc, lb)
+					if gotOK != wantOK || (wantOK && !gotT.Equal(wantT)) {
+						t.Fatalf("PrevFire(%s, %s, %v, %v) = (%v, %v), naive scan = (%v, %v)",
+							cron, zone, start, lb, gotT, gotOK, wantT, wantOK)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestPrevFireMidnightGapZone pins the reason prevDateEnd does not build the day
+// boundary with time.Date. Havana's clocks jump 00:00 -> 01:00 on 2026-03-08, so
+// time.Date(2026, 3, 8, 0, 0, 0, 0, havana) resolves backwards to 2026-03-07
+// 23:00; stepping a minute off that would skip 23:00-23:59 on the 7th and miss
+// this schedule entirely.
+func TestPrevFireMidnightGapZone(t *testing.T) {
+	havana, err := time.LoadLocation("America/Havana")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	c := mustParseSpec(t, "59 23 7 3 *") // 23:59 on March 7th
+
+	now := time.Date(2026, 3, 8, 12, 0, 0, 0, havana)
+	got, ok := c.PrevFire(now, havana, 48*time.Hour)
+	if !ok {
+		t.Fatal("expected to find 03-07 23:59 within 48h")
+	}
+	wall := got.In(havana)
+	if wall.Day() != 7 || wall.Hour() != 23 || wall.Minute() != 59 {
+		t.Fatalf("expected wall-clock 03-07 23:59, got %v", wall)
+	}
+}
+
+// TestPrevFireSkippedLocalDay covers the largest transition in tzdata: Apia
+// crossed the date line at the end of 2011, so 2011-12-30 never happened
+// locally. A schedule on that date can never fire; the day before still can.
+func TestPrevFireSkippedLocalDay(t *testing.T) {
+	apia, err := time.LoadLocation("Pacific/Apia")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	now := time.Date(2012, 1, 5, 12, 0, 0, 0, apia)
+
+	missing := mustParseSpec(t, "0 12 30 12 *")
+	if got, ok := missing.PrevFire(now, apia, 30*24*time.Hour); ok {
+		t.Fatalf("2011-12-30 never existed in Apia, got %v", got.In(apia))
+	}
+	real := mustParseSpec(t, "0 12 29 12 *")
+	got, ok := real.PrevFire(now, apia, 30*24*time.Hour)
+	if !ok {
+		t.Fatal("expected 2011-12-29 12:00 within 30d")
+	}
+	if wall := got.In(apia); wall.Day() != 29 || wall.Hour() != 12 {
+		t.Fatalf("expected wall-clock 12-29 12:00, got %v", wall)
+	}
+}
+
+// TestPrevFireYearLookback exercises the window the raised catch_up ceiling
+// allows, including the worst case: a spec that can never match must terminate
+// rather than grind through half a million minutes.
+func TestPrevFireYearLookback(t *testing.T) {
+	utc := time.UTC
+	now := time.Date(2026, 6, 18, 9, 0, 0, 0, utc)
+	year := 366 * 24 * time.Hour
+
+	monthly := mustParseSpec(t, "0 5 1 * *")
+	got, ok := monthly.PrevFire(now, utc, year)
+	if !ok {
+		t.Fatal("expected the monthly occurrence within a year")
+	}
+	if want := time.Date(2026, 6, 1, 5, 0, 0, 0, utc); !got.Equal(want) {
+		t.Fatalf("PrevFire = %v, want %v", got, want)
+	}
+
+	// February 30th never exists, so this scans the entire window and finds
+	// nothing - the case that used to cost 525,600 iterations.
+	never := mustParseSpec(t, "0 5 30 2 *")
+	if _, ok := never.PrevFire(now, utc, year); ok {
+		t.Fatal("February 30th should never match")
+	}
+}
+
+// BenchmarkPrevFireSparseYear pins the day-skip's payoff, which is what makes a
+// year-long catch_up affordable at one supervisor tick per minute. Measured on
+// an M2 Pro: the naive minute-by-minute scan took 19.2ms for this case, the
+// day-skip 24us.
+func BenchmarkPrevFireSparseYear(b *testing.B) {
+	c, err := ParseSpec("0 5 30 2 *")
+	if err != nil {
+		b.Fatal(err)
+	}
+	now := time.Date(2026, 6, 18, 9, 0, 0, 0, time.UTC)
+	year := 366 * 24 * time.Hour
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		c.PrevFire(now, time.UTC, year)
+	}
+}

@@ -45,8 +45,9 @@ jobs:
 - Beagle owns scheduling: a single supervisor agent ticks every minute (and on boot/wake) and triggers due jobs. This
   is what enables `catch_up` for runs missed while the Mac was powered off. `beagle doctor` reports whether the
   supervisor is loaded and actually ticking.
-- `catch_up` is `none` (default, strict) or a duration in `h`/`m`/`s` up to `168h`. Missed occurrences coalesce into a
-  single catch-up run.
+- `catch_up` is `none` (default, strict) or a duration in `h`/`m`/`s`/`d`/`w` up to `366d`. Missed occurrences coalesce
+  into a single catch-up run. A job beagle has not seen before adopts its last occurrence as a baseline rather than
+  running it, so adding a job never fires it retroactively.
 - Beagle hides scheduler implementation details from daily workflows.
 - Everything lives under `~/.beagle/`: config (`jobs.yaml`), run history (`beagle.db`), and logs (`logs/<job>/`).
 - `beagle ls` and `beagle status` show each job's last-run outcome, so a "loaded but failing" job is visible.

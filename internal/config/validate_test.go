@@ -3,6 +3,7 @@ package config
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestValidateValidFile(t *testing.T) {
@@ -42,16 +43,57 @@ func TestValidateValidFile(t *testing.T) {
 }
 
 func TestParseCatchUp(t *testing.T) {
-	ok := map[string]string{"": "inherit/unset", "none": "strict", "6h": "window", "90m": "window", "168h": "max"}
+	ok := map[string]string{
+		"":      "inherit/unset",
+		"none":  "strict",
+		"6h":    "window",
+		"90m":   "window",
+		"168h":  "window",
+		"1d":    "day unit",
+		"3d":    "day unit",
+		"2w":    "week unit",
+		"1w2d":  "mixed calendar units",
+		"1d12h": "calendar unit plus hours",
+		"1.5d":  "fractional day",
+		"8760h": "a year in hours",
+		"52w":   "a year in weeks",
+		"366d":  "max",
+	}
 	for in := range ok {
 		if _, err := ParseCatchUp(in); err != nil {
-			t.Errorf("ParseCatchUp(%q) unexpected error: %v", in, err)
+			t.Errorf("ParseCatchUp(%q, %s) unexpected error: %v", in, ok[in], err)
 		}
 	}
-	bad := []string{"1d", "garbage", "200h", "0h", "-3h"}
+	bad := []string{"garbage", "0h", "-3h", "0d", "367d", "8785h", "53w", "1y"}
 	for _, in := range bad {
 		if _, err := ParseCatchUp(in); err == nil {
 			t.Errorf("ParseCatchUp(%q) expected error, got nil", in)
+		}
+	}
+}
+
+// TestParseCatchUpCalendarUnitValues checks that d and w expand to the right
+// spans, not merely that they parse.
+func TestParseCatchUpCalendarUnitValues(t *testing.T) {
+	want := map[string]time.Duration{
+		"1d":    24 * time.Hour,
+		"3d":    72 * time.Hour,
+		"2w":    336 * time.Hour,
+		"1w2d":  216 * time.Hour,
+		"1d12h": 36 * time.Hour,
+		"1.5d":  36 * time.Hour,
+		"366d":  maxCatchUp,
+		"90m":   90 * time.Minute,
+		"6h":    6 * time.Hour,
+	}
+	for in, exp := range want {
+		got, err := ParseCatchUp(in)
+		if err != nil {
+			t.Errorf("ParseCatchUp(%q): %v", in, err)
+			continue
+		}
+		if got != exp {
+			t.Errorf("ParseCatchUp(%q) = %v, want %v", in, got, exp)
 		}
 	}
 }
@@ -207,5 +249,17 @@ func TestValidateEmptyCommandZeroRejected(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "must not be empty") {
 		t.Fatalf("expected empty command error, got: %v", err)
+	}
+}
+
+// TestParseCatchUpMaxErrorReadable keeps the ceiling legible in errors:
+// time.Duration would render maxCatchUp as 8784h0m0s.
+func TestParseCatchUpMaxErrorReadable(t *testing.T) {
+	_, err := ParseCatchUp("367d")
+	if err == nil {
+		t.Fatal("expected 367d to exceed the maximum")
+	}
+	if !strings.Contains(err.Error(), "366d") || strings.Contains(err.Error(), "8784h") {
+		t.Errorf("error should state the limit as 366d, got: %v", err)
 	}
 }

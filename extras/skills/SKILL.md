@@ -17,7 +17,7 @@ defaults:
   timezone: America/Chicago       # IANA timezone for scheduled jobs
   working_dir: /absolute/path     # must be absolute
   throttle_seconds: 30            # minimum seconds between runs (>= 0)
-  catch_up: none                  # default catch-up window (none, or e.g. 6h)
+  catch_up: none                  # default catch-up window (none, or e.g. 6h, 3d, 2w)
   env:
     KEY: value                    # environment variables for all jobs
   circuit_breaker:
@@ -48,13 +48,13 @@ jobs:
 
 - `version` must be `1`.
 - At least one job is required.
-- Job IDs must match `^[a-z0-9][a-z0-9_-]{1,63}$`. The id `supervisor` is reserved.
+- Job IDs must match `^[a-z0-9][a-z0-9_-]{0,63}$`. The id `supervisor` is reserved.
 - `command[0]` must be an absolute path. `command` must be non-empty.
 - `working_dir` (both defaults and per-job) must be absolute if set.
 - `schedule.cron` is required for `schedule` jobs and forbidden for `service` jobs.
 - `schedule.cron` must have exactly 5 fields.
 - `timezone` values must be valid IANA timezone names.
-- `catch_up` must be `none` (or empty) or a positive `h`/`m`/`s` duration <= `168h`. Day units (`1d`) are not accepted - use `24h`.
+- `catch_up` must be `none` (or empty) or a positive duration <= `366d`, in `h`/`m`/`s` plus `d` (days) and `w` (weeks): `6h`, `90m`, `3d`, `2w`, `1d12h`.
 - `throttle_seconds` and all `circuit_breaker` fields must be >= 0.
 - `restart` must be one of: `never`, `on-failure`, `always`.
 
@@ -69,7 +69,11 @@ beagle's supervisor notices the missed occurrence on the next tick and, if it's 
 runs it once (multiple missed occurrences coalesce into a single run).
 
 - `catch_up: none` (default) - strict; only fire at the scheduled minute.
-- `catch_up: 6h` - allow a missed run to execute up to 6 hours late.
+- `catch_up: 6h` - allow a missed run to execute up to 6 hours late. Also accepts `d` and `w`, up to `366d`.
+
+A job the supervisor has not seen before adopts its most recent occurrence as a baseline instead of running it, so
+adding a job with a `catch_up` window never fires it retroactively on the next tick. Catch-up applies from its next
+occurrence onward. Use `beagle run-now <id>` to run it immediately.
 
 Service jobs are unaffected: they run continuously under launchd's `KeepAlive` per their `restart` policy.
 

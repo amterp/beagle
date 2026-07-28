@@ -75,9 +75,12 @@ if the Mac is **powered off** the run is silently lost - with no control either 
 can do better. Each scheduled job has a `catch_up` window:
 
 - `catch_up: none` (the default) - strict. The job only runs at its scheduled minute; a miss is a miss.
-- `catch_up: 6h` (any duration in `h`/`m`/`s`, up to `168h`) - if the job's scheduled time was missed (e.g. the Mac was
-  off) and you're still within the window when it next comes up, beagle runs it once. Multiple missed occurrences
-  coalesce into a single catch-up run.
+- `catch_up: 6h` (any duration in `h`/`m`/`s`/`d`/`w`, up to `366d`) - if the job's scheduled time was missed (e.g. the
+  Mac was off) and you're still within the window when it next comes up, beagle runs it once. Multiple missed
+  occurrences coalesce into a single catch-up run, however many were missed.
+
+A job beagle has not seen before adopts its most recent occurrence as a baseline instead of running it, so adding a job
+never triggers a retroactive run on the spot. Catch-up applies from its next occurrence onward.
 
 ### Circuit Breaker
 
@@ -118,7 +121,7 @@ for testing).
 | `command`           | string list             | Required. First element must be an absolute path.                              |
 | `schedule.cron`     | string                  | 5-field cron expression. Required for schedule, forbidden for service.         |
 | `schedule.timezone` | string                  | IANA timezone. Overrides `defaults.timezone` for this job.                     |
-| `catch_up`          | string                  | `none` (default) or a duration like `6h`. How late a missed run may still go.  |
+| `catch_up`          | string                  | `none` (default) or a duration like `6h`, `3d`, `2w`. How late a missed run may go. |
 | `restart`           | string                  | `never`, `on-failure`, or `always`.                                            |
 | `enabled`           | bool                    | Default `true`. Set `false` to skip during apply.                              |
 | `working_dir`       | string                  | Absolute path. Overrides `defaults.working_dir`.                               |
@@ -133,10 +136,11 @@ globally. Jobs override defaults where specified.
 
 ### Validation
 
-- Job IDs: `^[a-z0-9][a-z0-9_-]{1,63}$` (the id `supervisor` is reserved).
+- Job IDs: `^[a-z0-9][a-z0-9_-]{0,63}$` (the id `supervisor` is reserved).
 - All paths (`command[0]`, `working_dir`) must be absolute.
 - Timezones must be valid IANA names.
-- `catch_up` must be `none` or a positive `h`/`m`/`s` duration <= `168h` (days like `1d` aren't accepted - use `24h`).
+- `catch_up` must be `none` or a positive duration <= `366d`, written in `h`/`m`/`s` plus `d` (days) and `w` (weeks):
+  `6h`, `90m`, `3d`, `2w`, `1d12h`. Days and weeks are fixed 24h and 168h spans, not calendar offsets.
 - Numeric fields (`throttle_seconds`, circuit breaker values) must be >= 0.
 
 ## Where Things Live
