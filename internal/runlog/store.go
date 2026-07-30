@@ -275,20 +275,58 @@ WHERE status = 'failed'`
 	return out, rows.Err()
 }
 
-func (s *Store) IsBreakerOpen(ctx context.Context, jobID string, now time.Time) (bool, time.Time, error) {
-	var openUntilRaw string
-	err := s.db.QueryRowContext(ctx, `SELECT open_until FROM breaker_state WHERE job_id = ?`, jobID).Scan(&openUntilRaw)
+// BreakerState is a job's circuit-breaker record: how many failures have
+// accrued in the current window and, if the breaker has tripped, when it
+// reopens.
+type BreakerState struct {
+	FailureCount int
+	WindowFrom   time.Time
+	OpenUntil    time.Time
+}
+
+// IsOpen reports whether the breaker is still suppressing runs at now. A zero
+// OpenUntil means the breaker has never tripped (or its timestamp is
+// unparseable, which we treat the same way rather than blocking runs on a
+// corrupt row).
+func (b BreakerState) IsOpen(now time.Time) bool {
+	return !b.OpenUntil.IsZero() && now.Before(b.OpenUntil)
+}
+
+// GetBreakerState reads a job's breaker record. found is false when the job has
+// no row at all, which is the normal state for a job that has never failed
+// under a configured breaker.
+func (s *Store) GetBreakerState(ctx context.Context, jobID string) (BreakerState, bool, error) {
+	var st BreakerState
+	var windowFromRaw, openUntilRaw string
+	err := s.db.QueryRowContext(ctx,
+		`SELECT failure_count, window_started_at, open_until FROM breaker_state WHERE job_id = ?`, jobID).
+		Scan(&st.FailureCount, &windowFromRaw, &openUntilRaw)
 	if err == sql.ErrNoRows {
-		return false, time.Time{}, nil
+		return BreakerState{}, false, nil
 	}
 	if err != nil {
+		return BreakerState{}, false, err
+	}
+	st.WindowFrom, _ = time.Parse(time.RFC3339Nano, windowFromRaw)
+	st.OpenUntil, _ = time.Parse(time.RFC3339Nano, openUntilRaw)
+	return st, true, nil
+}
+
+// ClearBreaker drops a job's breaker record so a tripped breaker stops
+// suppressing runs immediately. Deleting the row rather than zeroing it is
+// deliberate: RecordOutcome treats a missing row as a fresh window, so the next
+// failure starts counting from zero instead of resuming a nearly-tripped count.
+func (s *Store) ClearBreaker(ctx context.Context, jobID string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM breaker_state WHERE job_id = ?`, jobID)
+	return err
+}
+
+func (s *Store) IsBreakerOpen(ctx context.Context, jobID string, now time.Time) (bool, time.Time, error) {
+	st, found, err := s.GetBreakerState(ctx, jobID)
+	if err != nil || !found {
 		return false, time.Time{}, err
 	}
-	openUntil, err := time.Parse(time.RFC3339Nano, openUntilRaw)
-	if err != nil {
-		return false, time.Time{}, nil
-	}
-	return now.Before(openUntil), openUntil, nil
+	return st.IsOpen(now), st.OpenUntil, nil
 }
 
 func (s *Store) RecordOutcome(ctx context.Context, jobID string, now time.Time, failed bool, policy BreakerPolicy) error {

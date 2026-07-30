@@ -46,10 +46,18 @@ func (a *App) Run(args []string) error {
 	statusCmd := ra.NewCmd("status").SetDescription("Show detailed job status")
 	logsCmd := ra.NewCmd("logs").SetDescription("Show job logs")
 	failuresCmd := ra.NewCmd("failures").SetDescription("Show recent failures")
-	runNowCmd := ra.NewCmd("run-now").SetDescription("Trigger immediate run")
-	enableCmd := ra.NewCmd("enable").SetDescription("Enable a job")
-	disableCmd := ra.NewCmd("disable").SetDescription("Disable a job")
+	runNowCmd := ra.NewCmd("run-now").SetDescription("Run a job now, outside its schedule")
+	restartCmd := ra.NewCmd("restart").SetDescription("Restart a job: stop the running instance, start a fresh one")
+	startCmd := ra.NewCmd("start").SetDescription("Start a stopped job")
+	stopCmd := ra.NewCmd("stop").SetDescription("Stop a job until the next apply")
 	doctorCmd := ra.NewCmd("doctor").SetDescription("Run environment diagnostics")
+
+	// enable/disable predate start/stop and named the wrong thing: they load and
+	// unload a launchd agent, which collides with the config's own `enabled:`
+	// field (the durable switch) while being undone by the next apply. Kept
+	// hidden so existing muscle memory and scripts still work.
+	enableCmd := ra.NewCmd("enable").SetDescription("Deprecated alias for start").SetHidden(true)
+	disableCmd := ra.NewCmd("disable").SetDescription("Deprecated alias for stop").SetHidden(true)
 	superviseCmd := ra.NewCmd("supervise").
 		SetDescription("Run one scheduler tick; invoked by launchd").
 		SetHidden(true)
@@ -61,6 +69,11 @@ func (a *App) Run(args []string) error {
 	failuresJob, _ := ra.NewString("job").SetUsage("Job id").SetOptional(true).Register(failuresCmd)
 	failuresLimit, _ := ra.NewInt("limit").SetDefault(20).SetOptional(true).SetUsage("Number of failures").Register(failuresCmd)
 	runNowJob, _ := ra.NewString("job").SetUsage("Job id").Register(runNowCmd)
+	runNowForce, _ := ra.NewBool("force").SetOptional(true).SetUsage("Clear an open circuit breaker first").Register(runNowCmd)
+	restartJob, _ := ra.NewString("job").SetUsage("Job id, or `supervisor` to re-arm the scheduler").Register(restartCmd)
+	restartForce, _ := ra.NewBool("force").SetOptional(true).SetUsage("Clear an open circuit breaker first").Register(restartCmd)
+	startJob, _ := ra.NewString("job").SetUsage("Job id").Register(startCmd)
+	stopJob, _ := ra.NewString("job").SetUsage("Job id").Register(stopCmd)
 	enableJob, _ := ra.NewString("job").SetUsage("Job id").Register(enableCmd)
 	disableJob, _ := ra.NewString("job").SetUsage("Job id").Register(disableCmd)
 
@@ -89,6 +102,18 @@ func (a *App) Run(args []string) error {
 		return err
 	}
 	runNowUsed, err := root.RegisterCmd(runNowCmd)
+	if err != nil {
+		return err
+	}
+	restartUsed, err := root.RegisterCmd(restartCmd)
+	if err != nil {
+		return err
+	}
+	startUsed, err := root.RegisterCmd(startCmd)
+	if err != nil {
+		return err
+	}
+	stopUsed, err := root.RegisterCmd(stopCmd)
 	if err != nil {
 		return err
 	}
@@ -131,11 +156,19 @@ func (a *App) Run(args []string) error {
 	case *failuresUsed:
 		return a.runFailures(*failuresJob, *failuresLimit)
 	case *runNowUsed:
-		return a.runNow(*configPath, *runNowJob)
+		return a.runRestart(*configPath, *runNowJob, "run-now", "triggered", *runNowForce)
+	case *restartUsed:
+		return a.runRestart(*configPath, *restartJob, "restart", "restarted", *restartForce)
+	case *startUsed:
+		return a.runStart(*configPath, *startJob)
+	case *stopUsed:
+		return a.runStop(*configPath, *stopJob)
 	case *enableUsed:
-		return a.runEnable(*configPath, *enableJob)
+		a.deprecated("enable", "start")
+		return a.runStart(*configPath, *enableJob)
 	case *disableUsed:
-		return a.runDisable(*configPath, *disableJob)
+		a.deprecated("disable", "stop")
+		return a.runStop(*configPath, *disableJob)
 	case *doctorUsed:
 		return a.runDoctor()
 	case *superviseUsed:
@@ -267,6 +300,13 @@ func (a *App) runDoctor() error {
 	for _, issue := range report.Issues {
 		fmt.Fprintf(a.out, "%s %s\n", failStyle.Render(glyphFail), issue)
 	}
+	// Loaded but not ticking is the silent killer: no scheduled job fires, and
+	// apply cannot fix it - it sees a loaded agent with matching plist content and
+	// reports "unchanged". Name the one command that does.
+	if report.SupervisorLoaded && !ticking {
+		fmt.Fprintf(a.out, "%s %s\n", failStyle.Render(glyphFail),
+			"the supervisor is loaded but not ticking, so no scheduled job is firing - run `beagle restart supervisor`")
+	}
 	return nil
 }
 
@@ -354,61 +394,187 @@ func (a *App) runFailures(jobID string, limit int) error {
 	return nil
 }
 
-func (a *App) runNow(configPath string, jobID string) error {
+// runRestart backs both `restart` and `run-now`. They are one launchd operation -
+// kill any in-flight instance, start a fresh one - reached by two intents:
+// bouncing a service onto a rebuilt binary, and rerunning a scheduled job off
+// its schedule. cmd names the invoked command for error messages; verb is the
+// past-tense word to report on success.
+func (a *App) runRestart(configPath string, jobID string, cmd string, verb string, force bool) error {
+	fail := errStyle.Render(cmd + " failed:")
 	if strings.TrimSpace(jobID) == "" {
-		return fmt.Errorf("%s job id is required", errStyle.Render("run-now failed:"))
+		return fmt.Errorf("%s job id is required", fail)
 	}
+
+	// The supervisor is not a configured job, so it needs no config at all - and
+	// asking for it must not fail just because jobs.yaml is missing.
+	if jobID == core.SupervisorName {
+		if err := launchd.RestartSupervisor(launchd.OpsOptions{}); err != nil {
+			return fmt.Errorf("%s %v", fail, err)
+		}
+		fmt.Fprintf(a.out, "%s %s\n", okStyle.Render(glyphOK+" restarted"), "supervisor")
+		fmt.Fprintln(a.out, dimStyle.Render("  scheduler re-armed; check `beagle doctor` to confirm it is ticking"))
+		return nil
+	}
+
 	path, err := resolveConfigPath(configPath)
 	if err != nil {
-		return fmt.Errorf("%s %v", errStyle.Render("run-now failed:"), err)
+		return fmt.Errorf("%s %v", fail, err)
 	}
 	cfg, err := config.Load(path)
 	if err != nil {
-		return fmt.Errorf("%s %v", errStyle.Render("run-now failed:"), err)
+		return fmt.Errorf("%s %v", fail, err)
 	}
-	if err := launchd.RunNow(cfg, jobID, launchd.OpsOptions{}); err != nil {
-		return fmt.Errorf("%s %v", errStyle.Render("run-now failed:"), err)
+	if _, ok := cfg.Jobs[jobID]; !ok {
+		return fmt.Errorf("%s job not found: %s", fail, jobID)
 	}
-	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render(glyphOK+" triggered"), jobID)
+	if err := a.gateBreaker(jobID, force); err != nil {
+		return fmt.Errorf("%s %v", fail, err)
+	}
+	if err := launchd.Restart(cfg, jobID, launchd.OpsOptions{}); err != nil {
+		return fmt.Errorf("%s %v", fail, err)
+	}
+	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render(glyphOK+" "+verb), jobID)
 	return nil
 }
 
-func (a *App) runEnable(configPath string, jobID string) error {
+func (a *App) runStart(configPath string, jobID string) error {
 	if strings.TrimSpace(jobID) == "" {
-		return fmt.Errorf("%s job id is required", errStyle.Render("enable failed:"))
+		return fmt.Errorf("%s job id is required", errStyle.Render("start failed:"))
+	}
+	if jobID == core.SupervisorName {
+		return fmt.Errorf("%s %s", errStyle.Render("start failed:"), supervisorNotAJob("start"))
 	}
 	path, err := resolveConfigPath(configPath)
 	if err != nil {
-		return fmt.Errorf("%s %v", errStyle.Render("enable failed:"), err)
+		return fmt.Errorf("%s %v", errStyle.Render("start failed:"), err)
 	}
 	cfg, err := config.Load(path)
 	if err != nil {
-		return fmt.Errorf("%s %v", errStyle.Render("enable failed:"), err)
+		return fmt.Errorf("%s %v", errStyle.Render("start failed:"), err)
 	}
-	if err := launchd.Enable(cfg, jobID, launchd.OpsOptions{}); err != nil {
-		return fmt.Errorf("%s %v", errStyle.Render("enable failed:"), err)
+	if err := launchd.Start(cfg, jobID, launchd.OpsOptions{}); err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("start failed:"), err)
 	}
-	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render(glyphOK+" enabled"), jobID)
+	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render(glyphOK+" started"), jobID)
 	return nil
 }
 
-func (a *App) runDisable(configPath string, jobID string) error {
+func (a *App) runStop(configPath string, jobID string) error {
 	if strings.TrimSpace(jobID) == "" {
-		return fmt.Errorf("%s job id is required", errStyle.Render("disable failed:"))
+		return fmt.Errorf("%s job id is required", errStyle.Render("stop failed:"))
+	}
+	if jobID == core.SupervisorName {
+		return fmt.Errorf("%s %s", errStyle.Render("stop failed:"), supervisorNotAJob("stop"))
 	}
 	path, err := resolveConfigPath(configPath)
 	if err != nil {
-		return fmt.Errorf("%s %v", errStyle.Render("disable failed:"), err)
+		return fmt.Errorf("%s %v", errStyle.Render("stop failed:"), err)
 	}
 	cfg, err := config.Load(path)
 	if err != nil {
-		return fmt.Errorf("%s %v", errStyle.Render("disable failed:"), err)
+		return fmt.Errorf("%s %v", errStyle.Render("stop failed:"), err)
 	}
-	if err := launchd.Disable(cfg, jobID, launchd.OpsOptions{}); err != nil {
-		return fmt.Errorf("%s %v", errStyle.Render("disable failed:"), err)
+	job, ok := cfg.Jobs[jobID]
+	if !ok {
+		return fmt.Errorf("%s job not found: %s", errStyle.Render("stop failed:"), jobID)
 	}
-	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render(glyphOK+" disabled"), jobID)
+	if err := launchd.Stop(cfg, jobID, launchd.OpsOptions{}); err != nil {
+		return fmt.Errorf("%s %v", errStyle.Render("stop failed:"), err)
+	}
+	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render(glyphOK+" stopped"), jobID)
+	// A stop that silently un-does itself is the trap the old `disable` had, so
+	// say plainly that it is not durable and where the durable switch lives.
+	fmt.Fprintln(a.out, dimStyle.Render("  comes back on the next `beagle apply` or reboot - set `enabled: false` in jobs.yaml to keep it down"))
+	if strings.EqualFold(job.Type, "schedule") {
+		fmt.Fprintln(a.out, dimStyle.Render("  while stopped, the supervisor logs an error each time this job comes due"))
+	}
 	return nil
+}
+
+// supervisorNotAJob explains why stop/start reject the supervisor. Unloading the
+// scheduler stops every schedule job at once, so beagle does not offer it as a
+// one-word command; restart covers the case people actually want.
+func supervisorNotAJob(verb string) string {
+	return fmt.Sprintf("the supervisor is the scheduler, not a job, so `%s` does not apply to it - "+
+		"use `beagle restart supervisor` to re-arm it, or `beagle apply` to reinstall it", verb)
+}
+
+// deprecated warns that an old command name was used and names its replacement.
+// It goes to stderr so piping stdout stays clean.
+func (a *App) deprecated(old, replacement string) {
+	fmt.Fprintf(a.errOut, "%s `beagle %s` is now `beagle %s` - running %s\n",
+		warnStyle.Render("note:"), old, replacement, replacement)
+}
+
+// gateBreaker stops a manual run the circuit breaker would silently swallow.
+// beagle-run consults the breaker itself and records an open-circuit run as
+// "skipped" with exit 0, so without this check restart/run-now report success for
+// a command that never executed. force clears the breaker rather than refusing.
+//
+// Best-effort by design: an unreachable run-log must not block the user's actual
+// request. The exception is --force, which is an explicit instruction to clear
+// state - failing that silently would be its own lie.
+func (a *App) gateBreaker(jobID string, force bool) error {
+	dbPath, err := runlog.DefaultPath()
+	if err == nil {
+		if _, statErr := os.Stat(dbPath); statErr != nil {
+			err = statErr
+		}
+	}
+	var store *runlog.Store
+	if err == nil {
+		store, err = runlog.Open(dbPath)
+	}
+	if err != nil {
+		if force {
+			return fmt.Errorf("cannot reach the run log at %s to clear the circuit breaker: %w", dbPath, err)
+		}
+		return nil
+	}
+	defer store.Close()
+
+	ctx := context.Background()
+	st, found, err := store.GetBreakerState(ctx, jobID)
+	if err != nil {
+		if force {
+			return fmt.Errorf("read circuit breaker state: %w", err)
+		}
+		return nil
+	}
+
+	clear, err := breakerGate(st, found, force, jobID, time.Now())
+	if err != nil {
+		return err
+	}
+	if !clear {
+		return nil
+	}
+	if err := store.ClearBreaker(ctx, jobID); err != nil {
+		return fmt.Errorf("clear circuit breaker: %w", err)
+	}
+	fmt.Fprintf(a.out, "%s %s\n", okStyle.Render(glyphOK+" breaker cleared"), jobID)
+	return nil
+}
+
+// breakerGate decides what a manual run should do about the breaker: proceed
+// (clear=false, nil), clear it first (clear=true), or refuse with a message that
+// explains why the run would have been a no-op. Kept free of I/O so the wording -
+// the part that has to teach an operator what to do - stays under test.
+func breakerGate(st runlog.BreakerState, found, force bool, jobID string, now time.Time) (clear bool, err error) {
+	if !found || !st.IsOpen(now) {
+		return false, nil
+	}
+	if force {
+		return true, nil
+	}
+	return false, fmt.Errorf("circuit breaker is open until %s (%s from now).\n"+
+		"  %d failures in the last %s tripped it, so this run would be recorded as skipped and the command would never execute.\n"+
+		"  Fix the cause (`beagle logs %s --stderr`, `beagle failures --job %s`), or pass --force to clear the breaker and run anyway.",
+		st.OpenUntil.Local().Format("2006-01-02 15:04:05"),
+		st.OpenUntil.Sub(now).Round(time.Second),
+		st.FailureCount,
+		now.Sub(st.WindowFrom).Round(time.Second),
+		jobID, jobID)
 }
 
 // resolveConfigPath returns the config file to operate on: an explicit --config

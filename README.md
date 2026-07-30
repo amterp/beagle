@@ -102,14 +102,67 @@ beagle ls                                   List jobs, their state, and last-run
 beagle status <job>                         Detailed job status
 beagle logs <job> [--stderr] [--tail N]     View job output
 beagle failures [--job <job>] [--limit N]   Recent failure history
-beagle run-now <job>                        Trigger an immediate run
-beagle enable <job>                         Enable a job
-beagle disable <job>                        Disable a job
+beagle restart <job> [--force]              Stop the running instance, start a fresh one
+beagle run-now <job> [--force]              Run a job now, outside its schedule
+beagle start <job>                          Start a stopped job
+beagle stop <job>                           Stop a job until the next apply
 beagle doctor                               Environment diagnostics (incl. supervisor health)
 ```
 
 By default every command operates on `~/.beagle/jobs.yaml`. Pass `--config <path>` to point at a different file (handy
 for testing).
+
+## Restarting, Stopping, and Rerunning
+
+`beagle apply` reconciles config into launchd. It does not touch a job whose config hasn't changed, so rebuilding a
+binary leaves the old process running - the plist still says the same thing. Bouncing a job is a separate command:
+
+```sh
+beagle restart iris_serve     # service picks up the rebuilt binary
+beagle run-now mail_sync      # scheduled job runs now, off its schedule
+```
+
+Both do the same thing - kill any in-flight instance, start a fresh one - under the two names people reach for. Either
+works on either job type; they differ only in which one reads right at the terminal. A stopped job is loaded back into
+launchd first, so restarting something you stopped works without an intervening `apply`.
+
+`stop` and `start` control whether a job is loaded at all:
+
+```sh
+beagle stop kan_serve         # service's process ends; scheduled job stops firing
+beagle start kan_serve
+```
+
+**`stop` is not durable.** It unloads the launchd agent, and the next `beagle apply` or reboot brings the job back,
+because `jobs.yaml` is the single source of truth. To keep a job down, set `enabled: false` in the config and apply. A
+stopped *scheduled* job also makes the supervisor log an error each time that job comes due, since there's no agent to
+trigger.
+
+`beagle enable` and `beagle disable` are the former names of `start` and `stop`. They still work and print the new name.
+
+### When the circuit breaker is open
+
+A tripped breaker makes `beagle-run` record a run as `skipped` without executing the command, so `restart` refuses
+rather than reporting a success that didn't happen:
+
+```
+$ beagle restart helm_refresh
+restart failed: circuit breaker is open until 2026-07-29 18:42:11 (12m0s from now).
+  5 failures in the last 10m0s tripped it, so this run would be recorded as skipped and the command would never execute.
+  Fix the cause (`beagle logs helm_refresh --stderr`, `beagle failures --job helm_refresh`), or pass --force to clear
+  the breaker and run anyway.
+```
+
+`--force` clears the breaker and runs. It resets the failure count, so the next failure starts a fresh window.
+
+### Restarting the scheduler
+
+If `beagle doctor` reports the supervisor loaded but not ticking, no scheduled job is firing and `apply` won't fix it -
+apply sees a loaded agent whose plist matches and calls it unchanged. Re-arm it:
+
+```sh
+beagle restart supervisor
+```
 
 ## Configuration Reference
 

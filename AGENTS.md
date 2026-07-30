@@ -24,9 +24,15 @@ surface - re-doctor the local install before calling the work done:
 3. `beagle apply` - re-reconcile the jobs and the supervisor plist.
 4. `beagle doctor` - confirm the home dir, runner, and **supervisor (loaded
    and ticking)** are healthy. A loaded-but-not-ticking supervisor means no
-   scheduled job fires.
+   scheduled job fires; `beagle restart supervisor` re-arms it, and `apply`
+   cannot, since it sees a loaded agent whose plist matches.
 5. `beagle ls` - spot-check that jobs still report sane state and last-run
    health.
+6. `beagle restart <job>` for each running service, if `beagle-run` or anything
+   it links changed. Scheduled jobs exec a fresh `beagle-run` every run, but a
+   long-running service is still executing the wrapper binary it started with -
+   and `apply` will not replace it, since the job's plist is unchanged. Skip this
+   only when the change cannot affect the runner.
 
 The same applies after bumping the installed beagle version for any reason.
 The run-log DB tracks a schema version and wipes a foreign schema on open, so

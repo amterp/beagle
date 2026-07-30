@@ -1,6 +1,6 @@
 ---
 name: beagle
-description: Manage scheduled and always-on jobs on macOS with beagle. Write and edit the global ~/.beagle/jobs.yaml config, apply and validate config, check job status and logs, view failures, enable or disable jobs, configure catch-up windows for missed runs, troubleshoot with doctor, and tune circuit breaker and throttle policies.
+description: Manage scheduled and always-on jobs on macOS with beagle. Write and edit the global ~/.beagle/jobs.yaml config, apply and validate config, check job status and logs, view failures, restart or bounce a service onto a rebuilt binary, rerun a scheduled job now, stop and start jobs, clear a tripped circuit breaker, re-arm the supervisor when it stops ticking, configure catch-up windows for missed runs, troubleshoot with doctor, and tune circuit breaker and throttle policies.
 ---
 
 # Beagle
@@ -87,14 +87,49 @@ Service jobs are unaffected: they run continuously under launchd's `KeepAlive` p
 | `beagle status <job>` | Show detailed status for a job |
 | `beagle logs <job> [--stderr] [--tail N]` | Show job stdout (or stderr) logs |
 | `beagle failures [--job <job>] [--limit N]` | Show recent failures |
-| `beagle run-now <job>` | Trigger an immediate run |
-| `beagle enable <job>` | Enable a job |
-| `beagle disable <job>` | Disable a job |
+| `beagle restart <job> [--force]` | Stop the running instance, start a fresh one |
+| `beagle run-now <job> [--force]` | Run a job now, outside its schedule |
+| `beagle start <job>` | Start a stopped job |
+| `beagle stop <job>` | Stop a job until the next apply |
 | `beagle doctor` | Diagnostics, incl. whether the supervisor is loaded and ticking |
 
 Global flag: `--config <path>` (defaults to `~/.beagle/jobs.yaml`).
 
+`beagle enable`/`beagle disable` are the former names of `start`/`stop`. They still work and print the new name.
+
 (`beagle supervise` exists but is internal - it is the per-minute tick launchd invokes; you don't run it by hand.)
+
+## Restarting, Stopping, and Rerunning
+
+`beagle apply` skips any job whose config hasn't changed, so **it will not bounce a service onto a rebuilt binary** -
+the plist is identical, and apply reports it unchanged. Restarting is a separate command:
+
+- `beagle restart <job>` - kill any in-flight instance, start a fresh one. This is how a service picks up a new binary.
+- `beagle run-now <job>` - the same operation, named for running a scheduled job off its schedule.
+
+Either works on either job type. A stopped job is loaded back into launchd first, so restarting something you stopped
+needs no intervening `apply`. Prefer these over `stop`+`start` for bouncing a service: `stop` unloads asynchronously, so
+a bounce through it drops requests in the gap and can orphan a process still holding the port.
+
+`stop` and `start` control whether a job is loaded at all. `stop` ends a service's process and makes a scheduled job stop
+firing; `start` reverses it and is a no-op on a service that is already running.
+
+**`stop` is not durable.** It unloads the launchd agent, and the next `beagle apply` or reboot restores the job, because
+`jobs.yaml` is the single source of truth. To keep a job down, set `enabled: false` in the config and apply. A stopped
+*scheduled* job also makes the supervisor log an error each time that job comes due, since no agent exists to trigger.
+
+### Circuit breaker and --force
+
+An open breaker makes `beagle-run` record a run as `skipped` without executing the command. `restart` and `run-now`
+check for this and refuse rather than reporting a success that never happened, naming when the breaker reopens and how
+many failures tripped it. `--force` clears the breaker and runs, resetting the failure count so the next failure starts
+a fresh window.
+
+### Restarting the scheduler
+
+`beagle restart supervisor` re-arms the scheduler. Use it when `beagle doctor` reports the supervisor **loaded but not
+ticking** - no scheduled job is firing, and `apply` cannot fix it because it sees a loaded agent whose plist matches and
+calls it unchanged. `supervisor` is a reserved id, so `stop`/`start` reject it.
 
 ## Key Paths
 
@@ -128,8 +163,19 @@ Global flag: `--config <path>` (defaults to `~/.beagle/jobs.yaml`).
 3. `beagle logs <job>` and `beagle logs <job> --stderr` to inspect output.
 4. `beagle status <job>` to check whether the job is loaded and enabled.
 5. `beagle doctor` to verify the environment - including that the supervisor is loaded and ticking (if it isn't, no
-   scheduled job will fire).
-6. `beagle run-now <job>` to trigger a manual run and observe behavior.
+   scheduled job will fire; `beagle restart supervisor` re-arms it).
+6. `beagle run-now <job>` to trigger a manual run and observe behavior. If it refuses because the circuit breaker is
+   open, fix the cause first - `--force` clears the breaker when you need to retry immediately.
+
+### Redeploying a Service
+
+Rebuilding a service's binary does not restart it, and `beagle apply` will not either - the job's config is unchanged:
+
+1. Build the new binary.
+2. `beagle restart <job>`.
+3. `beagle ls` to confirm it is running, and `beagle logs <job> --stderr` if it isn't.
+
+Only run `beagle apply` if you also edited `jobs.yaml`; a changed plist makes apply reload the job for you.
 
 ### After Upgrading or Changing Beagle
 
@@ -140,5 +186,8 @@ firing:
 1. `beagle validate` - confirm `~/.beagle/jobs.yaml` still parses under the new rules.
 2. `beagle apply` - re-reconcile the jobs and the supervisor (plists embed absolute binary paths, so a rebuilt or moved
    binary needs a fresh `apply` to re-point them).
-3. `beagle doctor` - confirm the supervisor is loaded and ticking.
+3. `beagle doctor` - confirm the supervisor is loaded and ticking. If it is loaded but stale, `beagle restart
+   supervisor`.
 4. `beagle ls` - spot-check job state and last-run health.
+5. Long-running services still hold the *old* binary, since apply leaves an unchanged job alone. `beagle restart <job>`
+   each service that needs the new build.
