@@ -33,6 +33,31 @@ surface - re-doctor the local install before calling the work done:
    long-running service is still executing the wrapper binary it started with -
    and `apply` will not replace it, since the job's plist is unchanged. Skip this
    only when the change cannot affect the runner.
+7. **Cycle every schedule job, if `beagle-run` was rebuilt.** Rebuilding it
+   changes its code signature, and launchd keeps the Lightweight Code
+   Requirement it cached per already-registered agent, then refuses to spawn the
+   new binary. Affected jobs die with `EX_CONFIG` (78) and record nothing at
+   all, so `ls` shows a stale-but-successful last run, `failures` shows nothing,
+   `doctor` is clean, and `schedule_state` still advances - the occurrence is
+   consumed without running.
+
+   **Do not rely on a sweep to find them.** The `needs LWCR update` property
+   appears only once launchd has actually tried to spawn the job, so a sweep run
+   straight after the rebuild reports whichever subset happens to have attempted
+   a launch, and pronounces the rest healthy right up until they silently fail.
+   Cycle them all instead:
+
+   ```sh
+   for p in ~/Library/LaunchAgents/com.beagle.$(id -un).*.plist; do
+     j=$(basename "$p" .plist); j=${j#com.beagle.$(id -un).}
+     [ "$j" = supervisor ] || { beagle stop "$j" && beagle start "$j"; }
+   done
+   ```
+
+   Neither `apply` nor `restart` clears it; both reuse the same registration,
+   which is why this needs a real unload/reload. Afterwards confirm with a sweep
+   for `needs LWCR update`, and with `beagle run-now <job>` on one job to check a
+   run record actually appears.
 
 The same applies after bumping the installed beagle version for any reason.
 The run-log DB tracks a schema version and wipes a foreign schema on open, so
