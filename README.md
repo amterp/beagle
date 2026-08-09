@@ -82,6 +82,28 @@ can do better. Each scheduled job has a `catch_up` window:
 A job beagle has not seen before adopts its most recent occurrence as a baseline instead of running it, so adding a job
 never triggers a retroactive run on the spot. Catch-up applies from its next occurrence onward.
 
+### Timezones
+
+`schedule.timezone` takes an IANA name (`America/Chicago`), or the literal `local`.
+
+An **IANA name pins the job to a place**. Use it when the schedule is about somewhere: a market close, a ticket on-sale
+time, a provider's business day. `finlab_harvest` runs at 18:00 `America/New_York` because that is after the US market
+closes, and it should still be after the close when you are in Lisbon.
+
+**`local` pins the job to you.** The zone is re-resolved on every supervisor tick, so the schedule moves with the
+machine: a `local` job at 07:00 fires at 07:00 wherever you wake up. Use it for jobs whose point is to reach you at a
+civilised hour.
+
+Leaving `timezone` unset means **UTC**, not machine-local. That is a wart, kept because changing it would silently
+reschedule every job that omits the field. `beagle ls` marks any job whose zone differs from the machine's, so an
+accidental UTC schedule shows up as a `UTC` tag rather than staying invisible.
+
+When the machine does change zone, beagle notices. Each fire is recorded with the zone it was read in, so a move is
+detected and the "have we already run this?" check falls back to comparing absolute instants instead of wall clocks.
+Without that, carrying a laptop west would rewind the wall clock and silently skip every occurrence until it caught up -
+six hours of a `*/15` job is 24 dropped runs. The trade is beagle's usual one: a moved machine may run one occurrence
+twice, but will not silently drop one.
+
 ### Circuit Breaker
 
 If a job fails repeatedly, beagle trips a circuit breaker and stops running it until a cooldown period expires. This
@@ -173,7 +195,7 @@ beagle restart supervisor
 | `type`              | `schedule` or `service` | Required. Schedule jobs need a cron expression; service jobs run continuously. |
 | `command`           | string list             | Required. First element must be an absolute path.                              |
 | `schedule.cron`     | string                  | 5-field cron expression. Required for schedule, forbidden for service.         |
-| `schedule.timezone` | string                  | IANA timezone. Overrides `defaults.timezone` for this job.                     |
+| `schedule.timezone` | string                  | IANA timezone, or `local` to follow the machine. Overrides `defaults.timezone`. |
 | `catch_up`          | string                  | `none` (default) or a duration like `6h`, `3d`, `2w`. How late a missed run may go. |
 | `restart`           | string                  | `never`, `on-failure`, or `always`.                                            |
 | `enabled`           | bool                    | Default `true`. Set `false` to skip during apply.                              |
@@ -191,7 +213,7 @@ globally. Jobs override defaults where specified.
 
 - Job IDs: `^[a-z0-9][a-z0-9_-]{0,63}$` (the id `supervisor` is reserved).
 - All paths (`command[0]`, `working_dir`) must be absolute.
-- Timezones must be valid IANA names.
+- Timezones must be valid IANA names, or the literal `local`.
 - `catch_up` must be `none` or a positive duration <= `366d`, written in `h`/`m`/`s` plus `d` (days) and `w` (weeks):
   `6h`, `90m`, `3d`, `2w`, `1d12h`. Days and weeks are fixed 24h and 168h spans, not calendar offsets.
 - Numeric fields (`throttle_seconds`, circuit breaker values) must be >= 0.

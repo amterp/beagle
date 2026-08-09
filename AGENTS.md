@@ -45,3 +45,17 @@ adopts its most recent occurrence as a baseline rather than running it, so one
 genuinely missed run per catch-up job can be dropped across such an upgrade.
 Carrying `schedule_state` across a schema rebuild would remove that hazard and
 is worth doing before the next schema change.
+
+## `schedule_state.last_fire` is structured, and the schema hides that
+
+The column's own doc comment calls it "an opaque string owned by the caller",
+which is now carrying real weight: the supervisor packs three fields into it as
+`<wall-clock>|<zone>|<RFC3339 instant>`. Read it only through
+`decodeState`/`encodeState` in `internal/supervisor/state.go`. Comparing the
+raw column value - which is what the code did before the fields existed - sorts
+on the zone name and mis-deduplicates, and nothing in the DDL would warn you.
+
+The format is deliberately a packed string rather than new columns, because
+adding columns means bumping the schema version, and that wipes the table along
+with the missed run described above. A value with no `|` is a pre-upgrade row
+and must keep working; `decodeState` handles it.

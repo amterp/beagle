@@ -14,7 +14,7 @@ Config file: `~/.beagle/jobs.yaml` (override with `--config <path>`).
 ```yaml
 version: 1
 defaults:
-  timezone: America/Chicago       # IANA timezone for scheduled jobs
+  timezone: America/Chicago       # IANA name, or `local` to follow this machine
   working_dir: /absolute/path     # must be absolute
   throttle_seconds: 30            # minimum seconds between runs (>= 0)
   catch_up: none                  # default catch-up window (none, or e.g. 6h, 3d, 2w)
@@ -30,7 +30,7 @@ jobs:
     command: ["/absolute/path/to/binary", "--flag"]
     schedule:
       cron: "0 5 1 * *"          # 5-field cron (required for schedule)
-      timezone: America/New_York  # per-job timezone override
+      timezone: America/New_York  # per-job override; `local` follows the machine
     catch_up: 6h                  # run within 6h if the scheduled time was missed
     restart: never                # "never", "on-failure", or "always"
     enabled: true                 # default true; set false to skip
@@ -53,7 +53,7 @@ jobs:
 - `working_dir` (both defaults and per-job) must be absolute if set.
 - `schedule.cron` is required for `schedule` jobs and forbidden for `service` jobs.
 - `schedule.cron` must have exactly 5 fields.
-- `timezone` values must be valid IANA timezone names.
+- `timezone` values must be valid IANA timezone names, or the literal `local`.
 - `catch_up` must be `none` (or empty) or a positive duration <= `366d`, in `h`/`m`/`s` plus `d` (days) and `w` (weeks): `6h`, `90m`, `3d`, `2w`, `1d12h`.
 - `throttle_seconds` and all `circuit_breaker` fields must be >= 0.
 - `restart` must be one of: `never`, `on-failure`, `always`.
@@ -146,9 +146,23 @@ calls it unchanged. `supervisor` is a reserved id, so `stop`/`start` reject it.
 ### Adding a Scheduled Job
 
 1. Add a `schedule` type job to `~/.beagle/jobs.yaml` with a `cron` expression (and optionally a `catch_up` window).
-2. Run `beagle validate` to check the config.
-3. Run `beagle apply` to install the job.
-4. Verify with `beagle ls` and `beagle status <job>`.
+2. Pick the timezone deliberately - see below.
+3. Run `beagle validate` to check the config.
+4. Run `beagle apply` to install the job.
+5. Verify with `beagle ls` and `beagle status <job>`.
+
+### Choosing a Timezone
+
+Ask what the scheduled time is *about*.
+
+- **A place** - a market close, a ticket on-sale, a provider's business day. Use a fixed IANA name. It must stay correct
+  when the machine is elsewhere.
+- **The user** - a morning digest, a daily nudge, anything meant to arrive at a civilised hour. Use `local`. The zone is
+  re-resolved every supervisor tick, so the schedule travels with the machine.
+
+Two cautions. An unset `timezone` means **UTC**, not machine-local. And jobs scheduled to stagger against each other
+(a backup at 03:00, a prune at 04:30, an upload at 05:15 chosen to clear them) must all use the same kind of zone -
+moving some to `local` while others stay pinned silently destroys the gaps between them.
 
 ### Adding a Service
 

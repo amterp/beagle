@@ -5,7 +5,7 @@
 ```yaml
 version: 1
 defaults:
-  timezone: America/Chicago
+  timezone: America/Chicago   # IANA name, or `local` to follow this machine
   throttle_seconds: 30
   circuit_breaker:
     max_failures: 5
@@ -60,3 +60,6 @@ jobs:
 - Beagle hides scheduler implementation details from daily workflows.
 - Everything lives under `~/.beagle/`: config (`jobs.yaml`), run history (`beagle.db`), and logs (`logs/<job>/`).
 - `beagle ls` and `beagle status` show each job's last-run outcome, so a "loaded but failing" job is visible.
+- `schedule.timezone` accepts `local`, meaning "re-resolve to whatever zone this machine is in". Fixed IANA names pin a
+  job to a place (a market close); `local` pins it to you (a morning digest). An unset timezone means UTC, not
+  machine-local - `ls` tags any zone that differs from the machine's so that surprise is visible.

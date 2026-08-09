@@ -232,7 +232,7 @@ func TestTickFirstSightAdoptsWithoutFiring(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ok || got != "2026-06-18T07:00" {
+	if !ok || decodeState(got).Occurrence != "2026-06-18T07:00" {
 		t.Fatalf("expected the occurrence recorded as baseline, got %q (present=%v)", got, ok)
 	}
 }

@@ -67,14 +67,14 @@ func Tick(cfg config.File, deps Deps) (Result, error) {
 			continue
 		}
 
-		loc := time.UTC
-		if tz := j.Schedule.Timezone; tz != "" {
-			l, err := time.LoadLocation(tz)
-			if err != nil {
-				res.Errors = append(res.Errors, fmt.Sprintf("%s: bad timezone %q: %v", j.ID, tz, err))
-				continue
-			}
-			loc = l
+		// LoadZone resolves `local` against the machine's current zone and hands
+		// back the IANA name to record it under. Reading it fresh each tick is
+		// free here: the supervisor is a one-shot process launchd respawns every
+		// minute, so a machine that changed zone is noticed within a tick.
+		loc, zoneName, err := config.LoadZone(j.Schedule.Timezone)
+		if err != nil {
+			res.Errors = append(res.Errors, fmt.Sprintf("%s: bad timezone %q: %v", j.ID, j.Schedule.Timezone, err))
+			continue
 		}
 
 		spec, err := launchd.ParseSpec(j.Schedule.Cron)
@@ -96,12 +96,13 @@ func Tick(cfg config.File, deps Deps) (Result, error) {
 		}
 
 		occ := prevFire.In(loc).Format(occurrenceLayout)
+		state := encodeState(occ, zoneName, prevFire)
 		last, hadLast, err := deps.Store.GetScheduleFire(ctx, j.ID)
 		if err != nil {
 			res.Errors = append(res.Errors, fmt.Sprintf("%s: read schedule_state: %v", j.ID, err))
 			continue
 		}
-		if hadLast && occ <= last {
+		if hadLast && alreadyHandled(decodeState(last), occ, zoneName, prevFire) {
 			continue // already handled (or a backward-clock stale occurrence)
 		}
 
@@ -121,7 +122,7 @@ func Tick(cfg config.File, deps Deps) (Result, error) {
 		// truncated minute, so at 07:02:59 a strict job legitimately returns the
 		// 07:00 occurrence - 2m59s "late" against a 2m grace it never exceeded.
 		if !hadLast && prevFire.Before(deps.Now.Truncate(time.Minute).Add(-GraceWindow)) {
-			if err := deps.Store.RecordScheduleFire(ctx, j.ID, occ, deps.Now); err != nil {
+			if err := deps.Store.RecordScheduleFire(ctx, j.ID, state, deps.Now); err != nil {
 				res.Errors = append(res.Errors, fmt.Sprintf("%s: adopt occurrence: %v", j.ID, err))
 				continue
 			}
@@ -145,7 +146,7 @@ func Tick(cfg config.File, deps Deps) (Result, error) {
 		// Record only after a successful kick. A failed record (rare) risks one
 		// duplicate next tick - deliberately biased that way: a duplicate run is
 		// far less harmful than a silently dropped one.
-		if err := deps.Store.RecordScheduleFire(ctx, j.ID, occ, deps.Now); err != nil {
+		if err := deps.Store.RecordScheduleFire(ctx, j.ID, state, deps.Now); err != nil {
 			res.Errors = append(res.Errors, fmt.Sprintf("%s: record fire: %v", j.ID, err))
 		}
 		res.Fired = append(res.Fired, j.ID)

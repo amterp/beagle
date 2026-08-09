@@ -35,7 +35,7 @@ func Validate(f File) error {
 	}
 
 	if f.Defaults.Timezone != "" {
-		if _, err := time.LoadLocation(f.Defaults.Timezone); err != nil {
+		if _, _, err := LoadZone(f.Defaults.Timezone); err != nil {
 			errs = append(errs, fmt.Sprintf("defaults.timezone invalid: %v", err))
 		}
 	}
@@ -103,7 +103,7 @@ func Validate(f File) error {
 		}
 
 		if job.Schedule.Timezone != "" {
-			if _, err := time.LoadLocation(job.Schedule.Timezone); err != nil {
+			if _, _, err := LoadZone(job.Schedule.Timezone); err != nil {
 				errs = append(errs, fmt.Sprintf("jobs.%s.schedule.timezone invalid: %v", id, err))
 			}
 		}

@@ -395,8 +395,12 @@ ON CONFLICT(job_id) DO UPDATE SET
 }
 
 // GetScheduleFire returns the last-handled occurrence key for a schedule job.
-// The key is an opaque string owned by the caller (the supervisor stores a
-// wall-clock occurrence identity so DST fall-back fires exactly once).
+// The key is an opaque string owned by the caller, and it is structured: the
+// supervisor packs a wall-clock occurrence identity, the zone it was read in,
+// and the absolute instant into one value. Decode it with the supervisor's
+// state codec rather than comparing it directly, or the comparison sorts on the
+// zone name. It is a packed string and not extra columns precisely so that
+// adding a field does not bump the schema version and wipe the table.
 func (s *Store) GetScheduleFire(ctx context.Context, jobID string) (string, bool, error) {
 	var key string
 	err := s.db.QueryRowContext(ctx, `SELECT last_fire FROM schedule_state WHERE job_id = ?`, jobID).Scan(&key)
