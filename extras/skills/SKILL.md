@@ -83,7 +83,7 @@ Service jobs are unaffected: they run continuously under launchd's `KeepAlive` p
 |---|---|
 | `beagle validate` | Validate config file |
 | `beagle apply` | Reconcile managed jobs (and the supervisor) with launchd |
-| `beagle ls` | List configured jobs, their state, and last-run health |
+| `beagle ls` | List jobs, split into SERVICES (uptime, pid) and SCHEDULES (schedule, next fire, last run) |
 | `beagle status <job>` | Show detailed status for a job |
 | `beagle logs <job> [--stderr] [--tail N]` | Show job stdout (or stderr) logs |
 | `beagle failures [--job <job>] [--limit N]` | Show recent failures |
@@ -172,7 +172,8 @@ moving some to `local` while others stay pinned silently destroys the gaps betwe
 
 ### Debugging a Failing Job
 
-1. `beagle ls` - the last-run column shows a failing job at a glance.
+1. `beagle ls` - in the SCHEDULES section the last-run column shows a failing job at a glance, and NEXT shows when it
+   will try again. For a service, the SERVICES section shows `● running` with an uptime, or the exit code if it is down.
 2. `beagle failures --job <job>` for recent failure history with exit codes.
 3. `beagle logs <job>` and `beagle logs <job> --stderr` to inspect output.
 4. `beagle status <job>` to check whether the job is loaded and enabled.

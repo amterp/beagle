@@ -16,4 +16,9 @@ var (
 	labelStyle  = dimStyle                                            // kv keys
 	infoStyle   = dimStyle                                            // standalone info lines
 	headerStyle = lipgloss.NewStyle().Bold(true)                      // column headers
+
+	// Section titles outrank column headers, which are already bold, so they
+	// take the underline as well. The blank line above each one does most of
+	// the separating; this just keeps the eye from reading a title as a row.
+	sectionStyle = lipgloss.NewStyle().Bold(true).Underline(true)
 )

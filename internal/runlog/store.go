@@ -211,12 +211,21 @@ type RunSummary struct {
 	StartedAt time.Time
 	Status    string
 	ExitCode  int
+	// PID is the beagle-run wrapper that owns this run, which is also the
+	// process launchd supervises. Comparing it against what launchd currently
+	// reports is what tells a live service from a row left saying "running" by
+	// a run that was killed before it could finish.
+	PID int
+	// Duration is how long the run took. It is zero while the run is still
+	// going, which is how a service's uptime is derived: a live service has a
+	// running row, so now minus StartedAt is how long it has been up.
+	Duration time.Duration
 }
 
 // LastRunSummaries returns the latest run per job, newest run id wins.
 func (s *Store) LastRunSummaries(ctx context.Context) ([]RunSummary, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT job_id, started_at, status, IFNULL(exit_code, 0)
+SELECT job_id, started_at, status, IFNULL(exit_code, 0), IFNULL(pid, 0), IFNULL(duration_ms, 0)
 FROM runs
 WHERE id IN (SELECT MAX(id) FROM runs GROUP BY job_id)
 ORDER BY job_id`)
@@ -229,10 +238,12 @@ ORDER BY job_id`)
 	for rows.Next() {
 		var rs RunSummary
 		var startedRaw string
-		if err := rows.Scan(&rs.JobID, &startedRaw, &rs.Status, &rs.ExitCode); err != nil {
+		var durationMS int64
+		if err := rows.Scan(&rs.JobID, &startedRaw, &rs.Status, &rs.ExitCode, &rs.PID, &durationMS); err != nil {
 			return nil, err
 		}
 		rs.StartedAt, _ = time.Parse(time.RFC3339Nano, startedRaw)
+		rs.Duration = time.Duration(durationMS) * time.Millisecond
 		out = append(out, rs)
 	}
 	return out, rows.Err()

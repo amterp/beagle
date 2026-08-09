@@ -153,6 +153,83 @@ func (c CronSpec) PrevFire(now time.Time, loc *time.Location, maxLookback time.D
 	return time.Time{}, false
 }
 
+// NextFireHorizon bounds NextFire's forward search.
+//
+// A year is not enough, which is easy to get wrong: `0 5 29 2 *` is a legal
+// expression whose occurrences are up to eight years apart, because century
+// years divisible by 100 but not 400 are not leap years, so February 29th skips
+// from 2096 to 2104. A one-year bound would report that job as never firing.
+// Ten years clears that gap with room to spare.
+//
+// Nothing beyond it can fire at all, so a miss is a config mistake worth
+// reporting rather than a search worth extending: `0 0 30 2 *` asks for
+// February 30th. The day-skip keeps the miss cheap - a decade is a few thousand
+// date steps, not five million minutes.
+const NextFireHorizon = 10 * 366 * 24 * time.Hour
+
+// NextFire returns the first minute strictly after now whose wall-clock in loc
+// matches the expression, searching forward at most maxLookahead. It is the
+// mirror of PrevFire and shares its reasoning: it steps over absolute instants
+// and reads wall clock via In(loc), so the zone database handles DST rather
+// than field arithmetic.
+//
+// It starts at the minute after now rather than at now, so a job whose
+// occurrence is firing this very minute reports its following one. "Next" that
+// could mean "now" would make a schedule column read as permanently due.
+//
+// Whole non-matching local dates are skipped via nextDateStart, which is what
+// keeps a year-long horizon affordable on a sparse expression - the same
+// bound that makes PrevFire's year-long lookback cheap.
+func (c CronSpec) NextFire(now time.Time, loc *time.Location, maxLookahead time.Duration) (time.Time, bool) {
+	if loc == nil {
+		loc = time.UTC
+	}
+	base := now.Truncate(time.Minute)
+	cand := base.Add(time.Minute)
+	limit := base.Add(maxLookahead)
+	for !cand.After(limit) {
+		wall := cand.In(loc)
+		if !c.dateMatches(wall) {
+			cand = nextDateStart(cand, loc)
+			continue
+		}
+		if c.timeMatches(wall) {
+			return cand, true
+		}
+		cand = cand.Add(time.Minute)
+	}
+	return time.Time{}, false
+}
+
+// nextDateStart returns the first minute-aligned instant on the local date
+// after cand's. Jumping there can only skip instants sharing cand's local
+// date, which the caller has already ruled out.
+//
+// Like prevDateEnd it avoids time.Date for the boundary, for the same reason:
+// local midnight does not exist in every zone, and time.Date's result for a
+// nonexistent wall clock is explicitly not guaranteed.
+//
+// The addition is only a starting guess; the two loops make it exact for any
+// transition size. The first handles a date that grew (clocks went back), where
+// the guess is still inside it. The second handles a date that shrank, or was
+// skipped outright as Pacific/Apia's 2011-12-30 was, where the guess overshot
+// past the following date's start. The second loop cannot walk back past
+// cand+1m, because cand is itself on the date, so this always advances at least
+// a minute and NextFire cannot spin.
+func nextDateStart(cand time.Time, loc *time.Location) time.Time {
+	wall := cand.In(loc)
+	y, m, d := wall.Date()
+
+	t := cand.Add(time.Duration((23-wall.Hour())*60+(60-wall.Minute())) * time.Minute)
+	for onDate(t, loc, y, m, d) {
+		t = t.Add(time.Minute)
+	}
+	for !onDate(t.Add(-time.Minute), loc, y, m, d) {
+		t = t.Add(-time.Minute)
+	}
+	return t
+}
+
 // prevDateEnd returns the last minute-aligned instant strictly before the start
 // of cand's local date. Jumping there can only skip instants sharing cand's
 // local date, which the caller has already ruled out.

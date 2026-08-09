@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 
 	"github.com/amterp/beagle/internal/config"
@@ -18,15 +20,22 @@ type StatusOptions struct {
 	RunOut  OutputRunner
 }
 
+// JobStatus is a job's configuration alongside what launchd currently thinks
+// of it. The resolved config is embedded rather than copied field by field, so
+// callers reach ID/Type/Enabled exactly as before while also getting the
+// schedule, timezone and catch-up window that ls needs to describe a job.
 type JobStatus struct {
-	ID       string
-	Type     string
-	Enabled  bool
+	config.ResolvedJob
 	Label    string
 	Plist    string
 	Loaded   bool
 	Disabled bool
-	Raw      string
+	// PID is the process launchd is supervising, or 0 when it is running
+	// nothing. For a service that is the live truth about whether it is up,
+	// which a run-log row cannot tell you: the row still says "running" after
+	// the process has died.
+	PID int
+	Raw string
 }
 
 type DoctorReport struct {
@@ -55,14 +64,13 @@ func List(f config.File, opts StatusOptions) ([]JobStatus, error) {
 		plist := core.PlistPath(uc.HomeDir, label)
 		raw, loaded, disabled := inspectLabel(outRunner, uc.UID, label)
 		items = append(items, JobStatus{
-			ID:       j.ID,
-			Type:     j.Type,
-			Enabled:  j.Enabled,
-			Label:    label,
-			Plist:    plist,
-			Loaded:   loaded,
-			Disabled: disabled,
-			Raw:      raw,
+			ResolvedJob: j,
+			Label:       label,
+			Plist:       plist,
+			Loaded:      loaded,
+			Disabled:    disabled,
+			PID:         parsePID(raw),
+			Raw:         raw,
 		})
 	}
 	sort.Slice(items, func(i, k int) bool { return items[i].ID < items[k].ID })
@@ -157,6 +165,27 @@ func inspectLabel(runOut OutputRunner, uid string, label string) (raw string, lo
 	raw = strings.TrimSpace(out)
 	disabled = strings.Contains(raw, `"Disabled" => true`) || strings.Contains(raw, "disabled = true")
 	return raw, true, disabled
+}
+
+// pidPattern matches the pid line in `launchctl print` output, which reads
+// "\tpid = 759". Anchoring to a line start keeps it off the other keys that
+// end in "pid" (there is no such key today, but the dump is not our format to
+// rely on).
+var pidPattern = regexp.MustCompile(`(?m)^\s*pid\s*=\s*(\d+)`)
+
+// parsePID pulls the supervised process ID out of a launchctl print dump.
+// Absent (a loaded agent running nothing) or unparseable both yield 0, which
+// callers render as "not running" rather than guessing.
+func parsePID(raw string) int {
+	m := pidPattern.FindStringSubmatch(raw)
+	if m == nil {
+		return 0
+	}
+	pid, err := strconv.Atoi(m[1])
+	if err != nil {
+		return 0
+	}
+	return pid
 }
 
 func execOutput(name string, args ...string) (string, error) {

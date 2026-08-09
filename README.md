@@ -120,7 +120,7 @@ intended.
 ```
 beagle validate                             Validate config
 beagle apply                                Install/update/remove jobs in launchd
-beagle ls                                   List jobs, their state, and last-run health
+beagle ls                                   List jobs, split into services and schedules
 beagle status <job>                         Detailed job status
 beagle logs <job> [--stderr] [--tail N]     View job output
 beagle failures [--job <job>] [--limit N]   Recent failure history

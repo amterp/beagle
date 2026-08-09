@@ -289,6 +289,293 @@ func TestPrevFireYearLookback(t *testing.T) {
 	}
 }
 
+// nextFireNaive is the forward counterpart of prevFireNaive: the reference
+// minute-by-minute scan that nextDateStart's day-skip must agree with exactly.
+func nextFireNaive(c CronSpec, now time.Time, loc *time.Location, maxLookahead time.Duration) (time.Time, bool) {
+	if loc == nil {
+		loc = time.UTC
+	}
+	base := now.Truncate(time.Minute)
+	cand := base.Add(time.Minute)
+	limit := base.Add(maxLookahead)
+	for !cand.After(limit) {
+		if c.Matches(cand.In(loc)) {
+			return cand, true
+		}
+		cand = cand.Add(time.Minute)
+	}
+	return time.Time{}, false
+}
+
+// TestNextFireMatchesNaive mirrors TestPrevFireMatchesNaive over the same
+// zones, expressions and anchors. nextDateStart is meant to be a pure speedup
+// over the scan, so any disagreement is a bug in the skip.
+func TestNextFireMatchesNaive(t *testing.T) {
+	zones := []string{
+		"UTC",
+		"America/New_York",
+		"America/Havana",
+		"Asia/Beirut",
+		"Africa/Cairo",
+		"America/Santiago",
+		"Antarctica/Casey",
+		"Pacific/Apia",
+		"Australia/Lord_Howe",
+	}
+	crons := []string{
+		"* * * * *",
+		"0 7 * * *",
+		"30 2 * * *",
+		"30 1 * * *",
+		"0 0 * * *",
+		"59 23 * * *",
+		"0 5 1 * *",
+		"0 0 13 * 5",
+		"*/17 * * * *",
+		"0 5 29 2 *",
+	}
+	starts := []time.Time{
+		time.Date(2026, 3, 7, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 10, 31, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 3, 7, 3, 0, 0, 0, time.UTC),
+		time.Date(2016, 10, 21, 6, 0, 0, 0, time.UTC),
+		time.Date(2011, 12, 28, 6, 0, 0, 0, time.UTC),
+		time.Date(2026, 6, 18, 9, 15, 0, 0, time.UTC),
+		time.Date(2024, 2, 27, 0, 30, 0, 0, time.UTC),
+	}
+	lookaheads := []time.Duration{6 * time.Hour, 48 * time.Hour, 7 * 24 * time.Hour}
+
+	for _, zone := range zones {
+		loc, err := time.LoadLocation(zone)
+		if err != nil {
+			t.Skipf("tzdata unavailable: %v", err)
+		}
+		for _, cron := range crons {
+			c := mustParseSpec(t, cron)
+			for _, start := range starts {
+				for _, la := range lookaheads {
+					wantT, wantOK := nextFireNaive(c, start, loc, la)
+					gotT, gotOK := c.NextFire(start, loc, la)
+					if gotOK != wantOK || (wantOK && !gotT.Equal(wantT)) {
+						t.Fatalf("NextFire(%s, %s, %v, %v) = (%v, %v), naive scan = (%v, %v)",
+							cron, zone, start, la, gotT, gotOK, wantT, wantOK)
+					}
+				}
+			}
+		}
+	}
+}
+
+// TestNextFireSpringForward covers the wall-clock hour that does not exist:
+// 02:30 never happens in New York on 2026-03-08, so the next fire is the 9th.
+func TestNextFireSpringForward(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	c := mustParseSpec(t, "30 2 * * *")
+
+	now := time.Date(2026, 3, 7, 12, 0, 0, 0, ny)
+	got, ok := c.NextFire(now, ny, 7*24*time.Hour)
+	if !ok {
+		t.Fatal("expected a fire within a week")
+	}
+	if wall := got.In(ny); wall.Day() != 9 || wall.Hour() != 2 || wall.Minute() != 30 {
+		t.Fatalf("expected wall-clock 03-09 02:30 (the 8th is skipped), got %v", wall)
+	}
+}
+
+// TestNextFireFallBack covers the repeated hour. 01:30 happens twice on
+// 2026-11-01 in New York; NextFire returns the earlier (EDT) instant, which is
+// the mirror of PrevFire returning the later one.
+func TestNextFireFallBack(t *testing.T) {
+	ny, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	c := mustParseSpec(t, "30 1 * * *")
+
+	now := time.Date(2026, 11, 1, 0, 0, 0, 0, ny)
+	got, ok := c.NextFire(now, ny, 24*time.Hour)
+	if !ok {
+		t.Fatal("expected a fire within a day")
+	}
+	if wall := got.In(ny); wall.Day() != 1 || wall.Hour() != 1 || wall.Minute() != 30 {
+		t.Fatalf("expected wall-clock 11-01 01:30, got %v", wall)
+	}
+	if _, offset := got.In(ny).Zone(); offset != -4*3600 {
+		t.Fatalf("expected the first (EDT, -0400) of the two 01:30s, got offset %ds", offset)
+	}
+}
+
+// TestNextFireMidnightGapZone is the forward twin of
+// TestPrevFireMidnightGapZone: Havana's clocks jump 00:00 -> 01:00 on
+// 2026-03-08, so a boundary built with time.Date would land on the 7th and
+// nextDateStart must not rely on it.
+func TestNextFireMidnightGapZone(t *testing.T) {
+	havana, err := time.LoadLocation("America/Havana")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	c := mustParseSpec(t, "30 1 8 3 *") // 01:30 on March 8th, just past the gap
+
+	now := time.Date(2026, 3, 6, 12, 0, 0, 0, havana)
+	got, ok := c.NextFire(now, havana, 7*24*time.Hour)
+	if !ok {
+		t.Fatal("expected 03-08 01:30 within a week")
+	}
+	if wall := got.In(havana); wall.Day() != 8 || wall.Hour() != 1 || wall.Minute() != 30 {
+		t.Fatalf("expected wall-clock 03-08 01:30, got %v", wall)
+	}
+}
+
+// TestNextFireSkippedLocalDay is the forward twin of
+// TestPrevFireSkippedLocalDay: Apia's 2011-12-30 never happened, so a schedule
+// on it can never fire while the day after it can.
+func TestNextFireSkippedLocalDay(t *testing.T) {
+	apia, err := time.LoadLocation("Pacific/Apia")
+	if err != nil {
+		t.Skipf("tzdata unavailable: %v", err)
+	}
+	now := time.Date(2011, 12, 28, 12, 0, 0, 0, apia)
+
+	missing := mustParseSpec(t, "0 12 30 12 *")
+	if got, ok := missing.NextFire(now, apia, 30*24*time.Hour); ok {
+		t.Fatalf("2011-12-30 never existed in Apia, got %v", got.In(apia))
+	}
+	real := mustParseSpec(t, "0 12 31 12 *")
+	got, ok := real.NextFire(now, apia, 30*24*time.Hour)
+	if !ok {
+		t.Fatal("expected 2011-12-31 12:00 within 30d")
+	}
+	if wall := got.In(apia); wall.Day() != 31 || wall.Hour() != 12 {
+		t.Fatalf("expected wall-clock 12-31 12:00, got %v", wall)
+	}
+}
+
+// TestNextFireStrictlyAfterNow pins that an occurrence firing this very minute
+// reports the following one, so a schedule column never reads as permanently
+// due.
+func TestNextFireStrictlyAfterNow(t *testing.T) {
+	utc := time.UTC
+	c := mustParseSpec(t, "0 7 * * *")
+
+	now := time.Date(2026, 6, 18, 7, 0, 30, 0, utc)
+	got, ok := c.NextFire(now, utc, 48*time.Hour)
+	if !ok {
+		t.Fatal("expected tomorrow's occurrence")
+	}
+	if want := time.Date(2026, 6, 19, 7, 0, 0, 0, utc); !got.Equal(want) {
+		t.Fatalf("NextFire = %v, want %v", got, want)
+	}
+}
+
+// TestNextFireHorizon covers the bound: a reachable sparse expression is found,
+// an unreachable one terminates instead of grinding the whole window.
+func TestNextFireHorizon(t *testing.T) {
+	utc := time.UTC
+	now := time.Date(2026, 6, 18, 9, 0, 0, 0, utc)
+
+	monthly := mustParseSpec(t, "0 5 1 * *")
+	got, ok := monthly.NextFire(now, utc, NextFireHorizon)
+	if !ok {
+		t.Fatal("expected the monthly occurrence within a year")
+	}
+	if want := time.Date(2026, 7, 1, 5, 0, 0, 0, utc); !got.Equal(want) {
+		t.Fatalf("NextFire = %v, want %v", got, want)
+	}
+
+	never := mustParseSpec(t, "0 5 30 2 *")
+	if _, ok := never.NextFire(now, utc, NextFireHorizon); ok {
+		t.Fatal("February 30th should never match")
+	}
+}
+
+// TestNextFireLeapDay is why the horizon is a decade and not a year. February
+// 29th is a legal schedule whose occurrences sit up to eight years apart across
+// a century non-leap year, and a one-year bound reports it as never firing.
+func TestNextFireLeapDay(t *testing.T) {
+	utc := time.UTC
+	c := mustParseSpec(t, "0 5 29 2 *")
+
+	// Two years out, already beyond a one-year horizon.
+	now := time.Date(2026, 6, 18, 9, 0, 0, 0, utc)
+	got, ok := c.NextFire(now, utc, NextFireHorizon)
+	if !ok {
+		t.Fatal("expected 2028-02-29 to be reachable")
+	}
+	if want := time.Date(2028, 2, 29, 5, 0, 0, 0, utc); !got.Equal(want) {
+		t.Fatalf("NextFire = %v, want %v", got, want)
+	}
+
+	// The century gap itself: 2100 is not a leap year, so 2096 jumps to 2104.
+	now = time.Date(2096, 3, 1, 0, 0, 0, 0, utc)
+	got, ok = c.NextFire(now, utc, NextFireHorizon)
+	if !ok {
+		t.Fatal("expected 2104-02-29 to be reachable across the century gap")
+	}
+	if want := time.Date(2104, 2, 29, 5, 0, 0, 0, utc); !got.Equal(want) {
+		t.Fatalf("NextFire = %v, want %v", got, want)
+	}
+}
+
+// TestNextDateStartMakesProgress pins the termination argument directly: the
+// day-skip must always move forward, in every zone, including across the
+// transitions that make a local date shorter or longer than 24 hours.
+func TestNextDateStartMakesProgress(t *testing.T) {
+	zones := []string{
+		"UTC", "America/New_York", "America/Havana", "Asia/Beirut",
+		"Africa/Cairo", "America/Santiago", "Antarctica/Casey",
+		"Pacific/Apia", "Australia/Lord_Howe",
+	}
+	starts := []time.Time{
+		time.Date(2026, 3, 8, 0, 0, 0, 0, time.UTC),
+		time.Date(2026, 11, 1, 0, 0, 0, 0, time.UTC),
+		time.Date(2011, 12, 29, 0, 0, 0, 0, time.UTC),
+		time.Date(2016, 10, 22, 0, 0, 0, 0, time.UTC),
+	}
+	for _, zone := range zones {
+		loc, err := time.LoadLocation(zone)
+		if err != nil {
+			t.Skipf("tzdata unavailable: %v", err)
+		}
+		for _, start := range starts {
+			// Sweep two days a minute at a time around each transition.
+			for i := 0; i < 2*24*60; i++ {
+				cand := start.Add(time.Duration(i) * time.Minute)
+				next := nextDateStart(cand, loc)
+				if !next.After(cand) {
+					t.Fatalf("nextDateStart(%v, %s) = %v, must move forward", cand, zone, next)
+				}
+				// It must land on a different local date, and the minute before
+				// it must still be on cand's.
+				cy, cm, cd := cand.In(loc).Date()
+				if onDate(next, loc, cy, cm, cd) {
+					t.Fatalf("nextDateStart(%v, %s) = %v is still on the same local date", cand, zone, next)
+				}
+				if !onDate(next.Add(-time.Minute), loc, cy, cm, cd) {
+					t.Fatalf("nextDateStart(%v, %s) = %v overshot past the date boundary", cand, zone, next)
+				}
+			}
+		}
+	}
+}
+
+// BenchmarkNextFireSparseYear is the forward twin of
+// BenchmarkPrevFireSparseYear: ls computes a next fire per schedule job on
+// every invocation, so the day-skip has to hold here too.
+func BenchmarkNextFireSparseYear(b *testing.B) {
+	c, err := ParseSpec("0 5 30 2 *")
+	if err != nil {
+		b.Fatal(err)
+	}
+	now := time.Date(2026, 6, 18, 9, 0, 0, 0, time.UTC)
+	b.ResetTimer()
+	for i := 0; i < b.N; i++ {
+		c.NextFire(now, time.UTC, NextFireHorizon)
+	}
+}
+
 // BenchmarkPrevFireSparseYear pins the day-skip's payoff, which is what makes a
 // year-long catch_up affordable at one supervisor tick per minute. Measured on
 // an M2 Pro: the naive minute-by-minute scan took 19.2ms for this case, the

@@ -59,7 +59,8 @@ jobs:
   it sees the agent as unchanged.
 - Beagle hides scheduler implementation details from daily workflows.
 - Everything lives under `~/.beagle/`: config (`jobs.yaml`), run history (`beagle.db`), and logs (`logs/<job>/`).
-- `beagle ls` and `beagle status` show each job's last-run outcome, so a "loaded but failing" job is visible.
+- `beagle ls` splits jobs into SERVICES (uptime, pid) and SCHEDULES (schedule, next fire, last-run outcome and
+  duration), so a "loaded but failing" job is visible and so is one whose next run is further off than you expected.
 - `schedule.timezone` accepts `local`, meaning "re-resolve to whatever zone this machine is in". Fixed IANA names pin a
   job to a place (a market close); `local` pins it to you (a morning digest). An unset timezone means UTC, not
   machine-local - `ls` tags any zone that differs from the machine's so that surprise is visible.

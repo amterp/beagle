@@ -234,21 +234,7 @@ func (a *App) runList(configPath string) error {
 		return nil
 	}
 
-	health := loadJobHealth()
-
-	rows := make([][]string, 0, len(items))
-	for _, item := range items {
-		summary, ok := health[item.ID]
-		rows = append(rows, []string{
-			item.ID,
-			item.Type,
-			yesNo(item.Enabled),
-			stateCell(item),
-			runOutcome(summary, ok),
-			runWhen(summary, ok),
-		})
-	}
-	fmt.Fprint(a.out, table([]string{"JOB", "TYPE", "ENABLED", "STATE", "LAST RUN", ""}, rows))
+	fmt.Fprint(a.out, listSections(items, loadJobHealth(), time.Now(), config.MachineZone()))
 	return nil
 }
 
@@ -268,16 +254,38 @@ func (a *App) runStatus(configPath string, jobID string) error {
 	if err != nil {
 		return fmt.Errorf("%s %v", errStyle.Render("status failed:"), err)
 	}
+	now := time.Now()
+	summary, hasRun := loadJobHealth()[item.ID]
+	isService := item.Type == "service"
+
+	state := stateCell(item)
+	if isService {
+		state = serviceStateCell(item, summary, hasRun)
+	}
 	pairs := [][2]string{
 		{"job", item.ID},
 		{"type", item.Type},
 		{"enabled", yesNo(item.Enabled)},
-		{"state", stateCell(item)},
+		{"state", state},
 	}
-	if summary, ok := loadJobHealth()[item.ID]; ok {
+	if isService {
+		pairs = append(pairs,
+			[2]string{"uptime", uptimeCell(item, summary, hasRun, now)},
+			[2]string{"pid", pidCell(item.PID)},
+		)
+	} else {
+		pairs = append(pairs,
+			[2]string{"schedule", scheduleDetail(item)},
+			[2]string{"next run", nextDetail(item, now, config.MachineZone())},
+		)
+	}
+	if hasRun {
 		lastRun := runOutcome(summary, true)
 		if when := runWhen(summary, true); when != "" {
 			lastRun += "  " + when
+		}
+		if d := runDuration(summary, true); d != "" {
+			lastRun += "  " + d
 		}
 		pairs = append(pairs, [2]string{"last run", lastRun})
 	}
