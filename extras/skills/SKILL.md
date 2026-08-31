@@ -91,7 +91,7 @@ Service jobs are unaffected: they run continuously under launchd's `KeepAlive` p
 | `beagle run-now <job> [--force]` | Run a job now, outside its schedule |
 | `beagle start <job>` | Start a stopped job |
 | `beagle stop <job>` | Stop a job until the next apply |
-| `beagle doctor` | Diagnostics, incl. whether the supervisor is loaded and ticking |
+| `beagle doctor` | Diagnostics, incl. whether the supervisor is loaded, ticking, and runnable |
 
 Global flag: `--config <path>` (defaults to `~/.beagle/jobs.yaml`).
 
@@ -130,6 +130,9 @@ a fresh window.
 `beagle restart supervisor` re-arms the scheduler. Use it when `beagle doctor` reports the supervisor **loaded but not
 ticking** - no scheduled job is firing, and `apply` cannot fix it because it sees a loaded agent whose plist matches and
 calls it unchanged. `supervisor` is a reserved id, so `stop`/`start` reject it.
+
+The one case that needs `apply` instead is a supervisor registered to a binary that no longer exists, which doctor names
+explicitly. Restart reloads the same stale agent; only `apply` rewrites the plist.
 
 ## Key Paths
 
@@ -200,9 +203,12 @@ firing:
 
 1. `beagle validate` - confirm `~/.beagle/jobs.yaml` still parses under the new rules.
 2. `beagle apply` - re-reconcile the jobs and the supervisor (plists embed absolute binary paths, so a rebuilt or moved
-   binary needs a fresh `apply` to re-point them).
+   binary needs a fresh `apply` to re-point them). Run this even when the config has not changed: an install last
+   applied before v0.6.1 holds a versioned package path for the supervisor, which the upgrade just deleted.
 3. `beagle doctor` - confirm the supervisor is loaded and ticking. If it is loaded but stale, `beagle restart
-   supervisor`.
+   supervisor`. Doctor also reports a supervisor registered to a binary that no longer exists, one launchd has put in
+   its penalty box, and one whose last tick exited non-zero. A stale path needs `apply`, not `restart supervisor`,
+   which reloads the same agent.
 4. `beagle ls` - spot-check job state and last-run health.
 5. Long-running services still hold the *old* binary, since apply leaves an unchanged job alone. `beagle restart <job>`
    each service that needs the new build.

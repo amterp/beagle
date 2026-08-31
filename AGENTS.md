@@ -25,7 +25,12 @@ surface - re-doctor the local install before calling the work done:
 4. `beagle doctor` - confirm the home dir, runner, and **supervisor (loaded
    and ticking)** are healthy. A loaded-but-not-ticking supervisor means no
    scheduled job fires; `beagle restart supervisor` re-arms it, and `apply`
-   cannot, since it sees a loaded agent whose plist matches.
+   cannot, since it sees a loaded agent whose plist matches. Doctor also reads
+   launchd's registration, so a supervisor registered to a binary that no
+   longer exists, one in launchd's penalty box, and one whose last tick exited
+   non-zero each show up here. Note it reads the *registration*, not the plist
+   on disk: after an `apply` that wrote a plist without reloading the agent the
+   two disagree, and launchd's copy is the one that runs.
 5. `beagle ls` - spot-check that jobs still report sane state and last-run
    health.
 6. `beagle restart <job>` for each running service, if `beagle-run` or anything
@@ -63,6 +68,20 @@ The same applies after bumping the installed beagle version for any reason.
 The run-log DB tracks a schema version and wipes a foreign schema on open, so
 a version jump can reset run history - that's expected, but verify jobs still
 fire afterward.
+
+An install last applied before v0.6.1 has a versioned Cellar path in its
+supervisor plist, because `apply` used to resolve its own binary through its
+symlink. Upgrading the package deletes that path, and the supervisor then exits
+`EX_CONFIG` into launchd's penalty box on every spawn: no scheduled job fires,
+nothing is logged, and the heartbeat stays fresh long enough that a doctor run
+straight after the upgrade reported everything green. One `beagle apply` under
+v0.6.1 or later rewrites the plist with the stable symlink and the hazard is
+gone for good. Until then, check the path by hand:
+
+```sh
+launchctl print gui/$(id -u)/com.beagle.$(id -un).supervisor \
+  | grep -E 'program =|last exit|properties'
+```
 
 A wipe also clears `schedule_state`, the per-job record of which occurrence was
 last handled. The supervisor then treats every schedule job as newly seen and

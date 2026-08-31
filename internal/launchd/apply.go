@@ -103,7 +103,11 @@ func Apply(f config.File, opts ApplyOptions) (Summary, error) {
 	// The supervisor agent is always desired: it's the one job launchd keeps
 	// ticking, and the scheduler that drives every schedule job. Adding it to
 	// `desired` both bootstraps it and protects it from the global-glob GC below.
-	supervisorPath, err := resolveSupervisorPath(opts.SupervisorPath)
+	supervisorPath := opts.SupervisorPath
+	if supervisorPath == "" {
+		supervisorPath = strings.TrimSpace(os.Getenv("BEAGLE_SUPERVISOR_PATH"))
+	}
+	supervisorPath, err = resolveSupervisorPath(supervisorPath, os.Executable)
 	if err != nil {
 		return Summary{}, err
 	}
@@ -282,8 +286,18 @@ func resolveRunnerPath(path string) (string, error) {
 
 // resolveSupervisorPath resolves the `beagle` binary the supervisor plist
 // invokes. An explicit override wins; otherwise prefer the binary running this
-// apply (os.Executable), falling back to PATH.
-func resolveSupervisorPath(path string) (string, error) {
+// apply (self, normally os.Executable), falling back to PATH.
+//
+// The self path is deliberately NOT passed through filepath.EvalSymlinks. On
+// darwin os.Executable reports the path used to exec us without resolving
+// symlinks, so resolving here rewrites a package manager's stable
+// /opt/homebrew/bin/beagle into a versioned
+// /opt/homebrew/Cellar/beagle/<version>/bin/beagle. The next upgrade deletes
+// that directory, launchd can no longer spawn the supervisor, and it exits
+// EX_CONFIG into the penalty box - so nothing scheduled fires again until
+// someone happens to re-apply. Keeping the symlink is what makes the plist
+// survive an upgrade.
+func resolveSupervisorPath(path string, self func() (string, error)) (string, error) {
 	if path != "" {
 		if !filepath.IsAbs(path) {
 			return "", fmt.Errorf("supervisor path must be absolute: %s", path)
@@ -296,16 +310,15 @@ func resolveSupervisorPath(path string) (string, error) {
 		return path, nil
 	}
 
-	if self, err := os.Executable(); err == nil {
-		if resolved, err := filepath.EvalSymlinks(self); err == nil {
-			return resolved, nil
-		}
-		return self, nil
+	// A relative self path would land in the plist verbatim and launchd would
+	// refuse to spawn it, so fall through to PATH rather than write it.
+	if selfPath, err := self(); err == nil && filepath.IsAbs(selfPath) {
+		return selfPath, nil
 	}
 
 	found, err := exec.LookPath("beagle")
 	if err != nil {
-		return "", fmt.Errorf("beagle not found; set ApplyOptions.SupervisorPath to an absolute beagle binary")
+		return "", fmt.Errorf("beagle not found; set BEAGLE_SUPERVISOR_PATH to an absolute beagle binary")
 	}
 	return filepath.Abs(found)
 }

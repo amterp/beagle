@@ -57,6 +57,10 @@ jobs:
   executing. `--force` clears the breaker.
 - `beagle restart supervisor` re-arms the scheduler when doctor reports it loaded but not ticking - `apply` cannot, since
   it sees the agent as unchanged.
+- Doctor reads launchd's registration for the supervisor as well as beagle's heartbeat, and reports a program path that
+  no longer exists, launchd's penalty box, and a non-zero exit from the last tick. The heartbeat alone reads "ticking"
+  for three minutes after the supervisor dies. A stale program path needs `beagle apply`, which rewrites the plist;
+  `restart supervisor` reloads the same stale agent.
 - Beagle hides scheduler implementation details from daily workflows.
 - Everything lives under `~/.beagle/`: config (`jobs.yaml`), run history (`beagle.db`), and logs (`logs/<job>/`).
 - `beagle ls` splits jobs into SERVICES (uptime, pid) and SCHEDULES (schedule, next fire, last-run outcome and

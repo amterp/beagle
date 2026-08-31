@@ -2,6 +2,8 @@ package launchd
 
 import (
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -128,5 +130,77 @@ func TestDoctorDetectsMissingLaunchctl(t *testing.T) {
 	}
 	if !strings.Contains(strings.Join(report.Issues, "\n"), "scheduler backend command") {
 		t.Fatalf("expected scheduler backend issue, got %+v", report)
+	}
+}
+
+// doctorWithDump runs Doctor against a canned `launchctl print` dump for the
+// supervisor, leaving the other probes to behave normally.
+func doctorWithDump(t *testing.T, dump string) DoctorReport {
+	t.Helper()
+	runOut := func(name string, args ...string) (string, error) {
+		if len(args) >= 1 && args[0] == "print" {
+			return dump, nil
+		}
+		return "", nil
+	}
+	report, err := Doctor(StatusOptions{HomeDir: t.TempDir(), RunOut: runOut})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return report
+}
+
+// TestDoctorFlagsSupervisorLaunchdFailures covers the false green that let a
+// dead scheduler pass a health check: the heartbeat in the run DB stays fresh
+// for minutes after launchd loses the ability to spawn the supervisor, so
+// doctor has to read launchd's own view of the agent. The broken fixture is
+// trimmed from real output for a supervisor whose binary a package upgrade
+// removed.
+func TestDoctorFlagsSupervisorLaunchdFailures(t *testing.T) {
+	broken := `gui/501/com.beagle.amterp.supervisor = {
+	state = spawn scheduled
+	program = /opt/homebrew/Cellar/beagle/0.0.0-removed/bin/beagle
+	runs = 226
+	last exit code = 78: EX_CONFIG
+	properties = runatload | penalty box | inferred program | managed LWCR | has LWCR
+}`
+
+	report := doctorWithDump(t, broken)
+	if !report.SupervisorLoaded {
+		t.Fatalf("a loaded-but-broken agent must still read as loaded: %+v", report)
+	}
+	if !report.SupervisorProgramMissing || !report.SupervisorThrottled || report.SupervisorLastExit != 78 {
+		t.Fatalf("expected a missing program, throttling and exit 78, got %+v", report)
+	}
+	issues := strings.Join(report.Issues, "\n")
+	if !strings.Contains(issues, "beagle apply") {
+		t.Errorf("issues must name the command that re-points the agent, got: %s", issues)
+	}
+	if !strings.Contains(issues, "0.0.0-removed") {
+		t.Errorf("issues must name the path that no longer exists, got: %s", issues)
+	}
+
+	// The healthy case must stay silent, including launchd's non-numeric
+	// "(never exited)" - reading that as a failed tick would nag on every run.
+	present := filepath.Join(t.TempDir(), "beagle")
+	if err := os.WriteFile(present, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	healthy := `gui/501/com.beagle.amterp.supervisor = {
+	state = not running
+	program = ` + present + `
+	runs = 5
+	last exit code = (never exited)
+	properties = runatload | inferred program
+}`
+
+	report = doctorWithDump(t, healthy)
+	if report.SupervisorProgramMissing || report.SupervisorThrottled || report.SupervisorLastExit != -1 {
+		t.Fatalf("expected a clean supervisor, got %+v", report)
+	}
+	for _, issue := range report.Issues {
+		if strings.Contains(issue, "supervisor") {
+			t.Errorf("healthy supervisor must raise no supervisor issue, got: %s", issue)
+		}
 	}
 }

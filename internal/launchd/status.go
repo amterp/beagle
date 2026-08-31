@@ -44,7 +44,25 @@ type DoctorReport struct {
 	LaunchctlOK      bool
 	RunnerOK         bool
 	SupervisorLoaded bool
-	Issues           []string
+	// SupervisorProgram is the binary launchd will exec for the supervisor,
+	// read from its live registration rather than the plist on disk. When the
+	// two disagree, launchd's cached copy is the one that actually runs.
+	// Empty means the dump did not name one.
+	SupervisorProgram string
+	// SupervisorProgramMissing is set only on positive evidence: a program path
+	// was named and it does not exist. A dump we could not parse leaves this
+	// false, so a format change degrades to "no opinion" rather than a false
+	// alarm.
+	SupervisorProgramMissing bool
+	// SupervisorThrottled reports launchd's penalty box - it has stopped
+	// spawning the supervisor on schedule because the spawns keep failing.
+	SupervisorThrottled bool
+	// SupervisorLastExit is the supervisor's most recent exit status, or -1
+	// when launchd recorded none (including its literal "(never exited)").
+	// The supervisor exits every minute, so a non-zero value means the most
+	// recent tick failed.
+	SupervisorLastExit int
+	Issues             []string
 }
 
 func List(f config.File, opts StatusOptions) ([]JobStatus, error) {
@@ -134,15 +152,50 @@ func Doctor(opts StatusOptions) (DoctorReport, error) {
 
 	// The supervisor is the single agent that drives every schedule job; if it
 	// isn't loaded, nothing scheduled will ever fire.
+	report.SupervisorLastExit = -1
 	if uc, err := core.CurrentUserWithHome(home); err == nil {
-		if _, loaded, _ := inspectLabel(runner, uc.UID, core.SupervisorLabel(uc.Username)); loaded {
+		raw, loaded, _ := inspectLabel(runner, uc.UID, core.SupervisorLabel(uc.Username))
+		if loaded {
 			report.SupervisorLoaded = true
+			checkSupervisorHealth(&report, raw)
 		} else {
 			report.Issues = append(report.Issues, "scheduler supervisor is not loaded - run `beagle apply`")
 		}
 	}
 
 	return report, nil
+}
+
+// checkSupervisorHealth reads the supervisor's launchd registration for the
+// failures a heartbeat cannot rule out. The heartbeat only says a tick once
+// succeeded, so for the first few minutes after the supervisor breaks it still
+// looks fresh - which is exactly when someone runs doctor after an upgrade.
+func checkSupervisorHealth(report *DoctorReport, raw string) {
+	report.SupervisorProgram = parseProgram(raw)
+	report.SupervisorLastExit = parseLastExit(raw)
+	report.SupervisorThrottled = strings.Contains(raw, "penalty box")
+
+	if report.SupervisorProgram != "" {
+		if _, err := os.Stat(report.SupervisorProgram); err != nil {
+			report.SupervisorProgramMissing = true
+			report.Issues = append(report.Issues, fmt.Sprintf(
+				"the scheduler supervisor is registered to run %s, which no longer exists, so no scheduled job is firing - "+
+					"upgrading the beagle package is the usual cause; run `beagle apply` to re-point it "+
+					"(`beagle restart supervisor` cannot, it reloads the same stale agent)",
+				report.SupervisorProgram))
+		}
+	}
+
+	if report.SupervisorThrottled {
+		report.Issues = append(report.Issues,
+			"launchd has throttled the scheduler supervisor after repeated spawn failures, so scheduled jobs are firing "+
+				"late or not at all - fix the cause above, then `beagle apply`; check `beagle logs supervisor --stderr`")
+	}
+	if report.SupervisorLastExit > 0 {
+		report.Issues = append(report.Issues, fmt.Sprintf(
+			"the scheduler supervisor's most recent tick exited %d, so the jobs due that minute were skipped - "+
+				"check `beagle logs supervisor --stderr`", report.SupervisorLastExit))
+	}
 }
 
 func statusContext(opts StatusOptions) (uc core.UserContext, outRunner OutputRunner, err error) {
@@ -186,6 +239,44 @@ func parsePID(raw string) int {
 		return 0
 	}
 	return pid
+}
+
+// programPattern matches the program line in `launchctl print` output, which
+// reads "\tprogram = /opt/homebrew/bin/beagle". This is the binary launchd
+// will actually exec, which can differ from the plist on disk when the plist
+// has been rewritten without reloading the agent.
+var programPattern = regexp.MustCompile(`(?m)^\s*program\s*=\s*(\S.*?)\s*$`)
+
+// parseProgram pulls the registered program path out of a launchctl print
+// dump. Empty means the dump named none, which callers must read as "cannot
+// tell" rather than "missing".
+func parseProgram(raw string) string {
+	m := programPattern.FindStringSubmatch(raw)
+	if m == nil {
+		return ""
+	}
+	return m[1]
+}
+
+// lastExitPattern matches the exit status line, which launchd renders either
+// bare ("last exit code = 0"), with a name ("last exit code = 78: EX_CONFIG"),
+// or as the non-numeric "last exit code = (never exited)". Capturing only the
+// leading digits covers the first two and lets the third fall through.
+var lastExitPattern = regexp.MustCompile(`(?m)^\s*last exit code\s*=\s*(-?\d+)`)
+
+// parseLastExit pulls the most recent exit status out of a launchctl print
+// dump. -1 means launchd recorded none, so callers do not mistake an agent
+// that has never run for one that exited cleanly.
+func parseLastExit(raw string) int {
+	m := lastExitPattern.FindStringSubmatch(raw)
+	if m == nil {
+		return -1
+	}
+	code, err := strconv.Atoi(m[1])
+	if err != nil {
+		return -1
+	}
+	return code
 }
 
 func execOutput(name string, args ...string) (string, error) {

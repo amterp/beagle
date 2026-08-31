@@ -186,6 +186,18 @@ apply sees a loaded agent whose plist matches and calls it unchanged. Re-arm it:
 beagle restart supervisor
 ```
 
+Doctor reads launchd's own registration for the supervisor, not just beagle's heartbeat, and reports three failures the
+heartbeat cannot see: a program path that no longer exists, launchd's penalty box after repeated spawn failures, and a
+non-zero exit from the most recent tick. The heartbeat records that a tick once succeeded, so on its own it keeps
+reading "ticking" for three minutes after the supervisor dies.
+
+The stale-path case is worth naming, because a package upgrade used to cause it. The supervisor plist holds whichever
+absolute `beagle` path applied it, so an `apply` run through `/opt/homebrew/bin/beagle` records that symlink rather than
+the versioned Cellar file it points at. Recording the resolved target instead would strand the agent on the next
+upgrade: the path disappears, launchd cannot spawn the supervisor, and it exits `EX_CONFIG` into the penalty box with
+nothing written to any log. `beagle apply` re-points a plist in that state; `beagle restart supervisor` does not, since
+it reloads the same stale agent.
+
 ## Configuration Reference
 
 ### Job Fields

@@ -421,3 +421,48 @@ func TestReloadSkipsBootoutWhenNotLoaded(t *testing.T) {
 		t.Fatalf("did not expect a bootout when the job is not loaded, calls: %v", r.calls)
 	}
 }
+
+// TestResolveSupervisorPathKeepsSymlink pins the behavior that lets the
+// supervisor plist survive a package upgrade. Homebrew points a stable symlink
+// at a versioned directory; baking the resolved target into the plist means the
+// next upgrade deletes the path launchd was told to exec, and the scheduler
+// dies silently. Every other test injects SupervisorPath explicitly, so this is
+// the only cover for the self-path branch.
+func TestResolveSupervisorPathKeepsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	versionedDir := filepath.Join(dir, "Cellar", "beagle", "0.6.0", "bin")
+	if err := os.MkdirAll(versionedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	versioned := filepath.Join(versionedDir, "beagle")
+	if err := os.WriteFile(versioned, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stableDir := filepath.Join(dir, "bin")
+	if err := os.MkdirAll(stableDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	stable := filepath.Join(stableDir, "beagle")
+	if err := os.Symlink(versioned, stable); err != nil {
+		t.Fatal(err)
+	}
+	selfIsSymlink := func() (string, error) { return stable, nil }
+
+	got, err := resolveSupervisorPath("", selfIsSymlink)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != stable {
+		t.Errorf("resolveSupervisorPath = %q, want the stable symlink %q - a versioned path stops working on upgrade", got, stable)
+	}
+
+	if got, err := resolveSupervisorPath(versioned, selfIsSymlink); err != nil || got != versioned {
+		t.Errorf("explicit override = %q (err %v), want %q", got, err, versioned)
+	}
+
+	// A relative self path must never reach the plist - launchd cannot spawn it -
+	// so resolution falls through to PATH instead.
+	if got, _ := resolveSupervisorPath("", func() (string, error) { return "beagle", nil }); got == "beagle" {
+		t.Error("resolveSupervisorPath returned a relative path; launchd cannot spawn it")
+	}
+}

@@ -300,18 +300,28 @@ func (a *App) runDoctor() error {
 	}
 
 	ticking, tickDetail := supervisorTickStatus()
+	// A heartbeat only says some tick once succeeded. If launchd can no longer
+	// exec the supervisor, the last pre-breakage tick keeps the age looking
+	// healthy for minutes, so believing it here is what turned a dead scheduler
+	// into a green doctor. Positive evidence of a stale binary overrules it.
+	if report.SupervisorProgramMissing {
+		ticking = false
+		tickDetail = warnStyle.Render("stale binary")
+	}
 	fmt.Fprintln(a.out, check(report.HomeDirOK, "home directory", ""))
 	fmt.Fprintln(a.out, check(report.LaunchAgentsOK && report.LaunchctlOK, "scheduler backend", ""))
 	fmt.Fprintln(a.out, check(report.RunnerOK, "runner found", ""))
-	fmt.Fprintln(a.out, check(report.SupervisorLoaded, "supervisor loaded", ""))
+	fmt.Fprintln(a.out, check(report.SupervisorLoaded && !report.SupervisorProgramMissing, "supervisor loaded", ""))
 	fmt.Fprintln(a.out, check(ticking, "supervisor ticking", tickDetail))
 	for _, issue := range report.Issues {
 		fmt.Fprintf(a.out, "%s %s\n", failStyle.Render(glyphFail), issue)
 	}
 	// Loaded but not ticking is the silent killer: no scheduled job fires, and
 	// apply cannot fix it - it sees a loaded agent with matching plist content and
-	// reports "unchanged". Name the one command that does.
-	if report.SupervisorLoaded && !ticking {
+	// reports "unchanged". Name the one command that does. A stale binary is the
+	// exception: there the agent must be re-rendered, and the issue above already
+	// says so, so pointing at restart would send the reader down a dead end.
+	if report.SupervisorLoaded && !ticking && !report.SupervisorProgramMissing {
 		fmt.Fprintf(a.out, "%s %s\n", failStyle.Render(glyphFail),
 			"the supervisor is loaded but not ticking, so no scheduled job is firing - run `beagle restart supervisor`")
 	}
